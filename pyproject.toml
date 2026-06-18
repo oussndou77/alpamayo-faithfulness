@@ -1,0 +1,30 @@
+[project]
+name = "alpamayo-faithfulness"
+version = "0.1.0"
+description = "Faithfulness evaluation harness for NVIDIA Alpamayo Chain-of-Causation reasoning traces"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Ousseynou Ndour" }]
+
+# Core harness (parser + axes + scorecard) — pure-Python, runs on a laptop, no GPU.
+dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# Heavy deps only needed to RUN Alpamayo inference on a GPU pod (Phase A).
+gpu = [
+    "torch>=2.1",
+    "transformers>=4.44",
+    "huggingface_hub>=0.24",
+    "pandas>=2.0",
+    "mediapy",
+]
+# Dev / testing.
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

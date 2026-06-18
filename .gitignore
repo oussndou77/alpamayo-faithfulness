@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Model weights & data — NEVER commit (NVIDIA non-commercial / dataset license)
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+weights/
+checkpoints/
+data/
+datasets/
+*.parquet
+*.mp4
+*.png
+*.jpg
+*.npy
+*.npz
+# (fixtures/*.json are committed on purpose — small synthetic examples)
+
+# Outputs / runs
+outputs/
+runs/
+*.log
+
+# Secrets — NEVER commit
+.env
+*.key
+hf_token*
+.huggingface/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
