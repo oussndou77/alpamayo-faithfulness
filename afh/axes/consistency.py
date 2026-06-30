@@ -12,13 +12,19 @@ from afh.trace import ParsedClaim, TrajectorySummary
 
 def summarize_trajectory(xy: List[Tuple[float, float]], dt: float = 0.5,
                          decel_thresh: float = 0.5,
-                         lateral_thresh: float = 0.5) -> TrajectorySummary:
+                         lateral_thresh: float = 0.5,
+                         early_s: float = 2.0) -> TrajectorySummary:
     """
     Turn a list of (x, y) trajectory points into a behavior-level summary.
     +x is forward (initial heading), +y is left.
 
     decel_thresh   : m/s speed change (end vs start) to call it accel/decel
     lateral_thresh : meters of lateral offset to call it a nudge
+    early_s        : seconds of the EARLY window used to read the lateral maneuver.
+                     Over a long horizon road curvature dominates the lateral signal
+                     (a gentle bend over ~100 m of forward travel yields tens of meters
+                     of offset that has nothing to do with a nudge), so the maneuver is
+                     read from the first ~2 s, where the intent actually shows up.
     """
     if len(xy) < 2:
         return TrajectorySummary(longitudinal="maintain", lateral="straight")
@@ -37,9 +43,12 @@ def summarize_trajectory(xy: List[Tuple[float, float]], dt: float = 0.5,
     else:
         longitudinal = "maintain"
 
-    # lateral offset: y relative to start (since +y is left); take the extreme
-    lateral_offsets = [p[1] - xy[0][1] for p in xy]
-    max_off = max(lateral_offsets, key=abs)
+    # lateral offset: y relative to start (since +y is left). Restrict to an EARLY
+    # window so the maneuver (nudge / lane change) is captured before road curvature
+    # over the full horizon swamps the signal. Take the extreme within that window.
+    early_steps = max(1, min(len(xy) - 1, int(early_s / dt)))
+    early_offsets = [p[1] - xy[0][1] for p in xy[:early_steps + 1]]
+    max_off = max(early_offsets, key=abs)
     if max_off > lateral_thresh:
         lateral = "nudge_left"
     elif max_off < -lateral_thresh:
