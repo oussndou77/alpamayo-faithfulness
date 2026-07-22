@@ -38,8 +38,8 @@ def main():
     from alpamayo_r1.load_physical_aiavdataset import load_physical_aiavdataset
 
     avdi = physical_ai_av.PhysicalAIAVDatasetInterface()
-    intr = avdi.get_clip_feature(args.clip, "camera_intrinsics")       # CameraIntrinsics
-    extr = avdi.get_clip_feature(args.clip, "sensor_extrinsics")       # SensorExtrinsics
+    intr = avdi.get_clip_feature(args.clip, "camera_intrinsics", maybe_stream=True)   # CameraIntrinsics
+    extr = avdi.get_clip_feature(args.clip, "sensor_extrinsics", maybe_stream=True)   # SensorExtrinsics
 
     data = load_physical_aiavdataset(args.clip, t0_us=args.t0_us)
     frames = data["image_frames"]      # (n_cam, n_t, 3, H, W)
