@@ -38,6 +38,69 @@ import json
 import copy
 import os
 
+# obstacle.offline label_class -> harness object_type (afh.parser.AGENT_SYNONYMS vocabulary)
+OBSTACLE_CLASS_MAP = {
+    "automobile": "car",
+    "person": "pedestrian",
+    "heavy_truck": "truck",
+    "truck": "truck",
+    "bus": "bus",
+    "bicycle": "cyclist",
+    "cyclist": "cyclist",
+    "motorcycle": "motorcycle",
+}
+
+
+def load_scene_objects(clip_id, t0_us, window_us=200_000, max_range_m=80.0):
+    """
+    Axis-2 ground truth: the dataset's `labels/obstacle.offline` cuboids around t0.
+
+    Schema learned empirically (the wiki's Machine Labels page is still "Coming Soon"):
+      columns: timestamp_us, track_id, center_x/y/z, size_x/y/z, orientation_*,
+               label_class ('automobile', 'person', ...), reference_frame ('rig'),
+               reference_frame_timestamp_us.
+      reference_frame_timestamp_us == timestamp_us row-by-row -> positions are in the
+      INSTANTANEOUS vehicle rig frame (DriveWorks convention: +x forward, +y left),
+      so no egomotion transform is needed: filter to |t - t0| < window, dedupe per track.
+
+    Caveats (documented, not hidden):
+      * offline labels cover ~97% of clips — absent labels -> empty list, and the
+        grounding axis reports n/a (never a fake hallucination).
+      * these are machine autolabels (non-GT).
+      * an object's instantaneous side (+y sign) can differ from its apparent side in
+        the image when the road curves; side matching is therefore approximate.
+    """
+    from afh.trace import SceneObject
+    try:
+        import physical_ai_av
+        avdi = physical_ai_av.PhysicalAIAVDatasetInterface()
+        pres = avdi.feature_presence
+        if "obstacle.offline" not in pres.columns or not bool(pres.at[clip_id, "obstacle.offline"]):
+            print(f"   [labels] no obstacle.offline for {clip_id} -> scene_objects empty (grounding n/a)")
+            return []
+        df = avdi.get_clip_feature(clip_id, "obstacle.offline")["obstacle.offline"]
+    except Exception as e:
+        print(f"   [labels] load failed ({type(e).__name__}: {str(e)[:120]}) -> scene_objects empty")
+        return []
+
+    win = df[(df["timestamp_us"] - t0_us).abs() < window_us]
+    if win.empty:
+        return []
+    # one observation per track: the one closest to t0
+    idx = (win["timestamp_us"] - t0_us).abs().groupby(win["track_id"]).idxmin()
+    win = win.loc[idx]
+    objs = []
+    for _, r in win.iterrows():
+        x, y = float(r["center_x"]), float(r["center_y"])
+        if (x * x + y * y) ** 0.5 > max_range_m:
+            continue
+        objs.append(SceneObject(
+            object_type=OBSTACLE_CLASS_MAP.get(str(r["label_class"]), str(r["label_class"])),
+            x=x, y=y,
+            object_id=int(r["track_id"]) if str(r["track_id"]).isdigit() else None,
+        ))
+    return objs
+
 
 def _extract_reasoning(cot_entry):
     """extra['cot'][0] -> ordered list of unique reasoning sentences (handles ndarray / nesting)."""
@@ -135,10 +198,11 @@ def run(clip_indices, k_rollouts, out_path, clip_index_path="notebooks/clip_ids.
             print(f"[{idx}] {clip_id} rollout {k}: ADE={ades[-1]:.2f} | "
                   f"{sentences[0][:80] if sentences else '(empty)'}")
 
-        # TODO(Phase A, axis 2): populate scene_objects from the dataset's label features
-        # (avdi.get_clip_feature(clip_id, avdi.features.LABELS....)); map object_type +
-        # 3D location into the ego frame at t0. Left empty until that API is wired in.
-        scene = []
+        # Axis 2: real scene objects from the dataset's obstacle autolabels
+        scene = load_scene_objects(clip_id, t0_us)
+        if scene:
+            print(f"   [labels] {len(scene)} scene objects near t0 "
+                  f"(closest at {min((o.x**2+o.y**2)**0.5 for o in scene):.1f} m)")
 
         min_ade = min(ades) if ades else None
         records.append(ClipRecord(clip_id=clip_id, traces=traces, trajectories=trajs,
@@ -160,8 +224,10 @@ def run(clip_indices, k_rollouts, out_path, clip_index_path="notebooks/clip_ids.
 
 def main():
     ap = argparse.ArgumentParser(description="Run Alpamayo and save ClipRecords (Phase A)")
-    ap.add_argument("--clips", type=int, nargs="+", default=[0, 1, 2],
-                    help="clip indices into the clip index parquet")
+    ap.add_argument("--clips", type=int, nargs="+", default=[1, 3, 4],
+                    help="clip indices into the clip index parquet (defaults are clips "
+                         "that HAVE obstacle.offline labels, so Axis 2 is active; "
+                         "index 0 lacks labels -> grounding would be n/a)")
     ap.add_argument("--k-rollouts", type=int, default=5,
                     help="independent rollouts per clip (different seeds) -> stability axis")
     ap.add_argument("--clip-index", default="notebooks/clip_ids.parquet",
