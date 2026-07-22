@@ -78,7 +78,7 @@ def load_scene_objects(clip_id, t0_us, window_us=200_000, max_range_m=80.0):
         if "obstacle.offline" not in pres.columns or not bool(pres.at[clip_id, "obstacle.offline"]):
             print(f"   [labels] no obstacle.offline for {clip_id} -> scene_objects empty (grounding n/a)")
             return []
-        df = avdi.get_clip_feature(clip_id, "obstacle.offline")["obstacle.offline"]
+        df = avdi.get_clip_feature(clip_id, "obstacle.offline", maybe_stream=True)["obstacle.offline"]
     except Exception as e:
         print(f"   [labels] load failed ({type(e).__name__}: {str(e)[:120]}) -> scene_objects empty")
         return []
