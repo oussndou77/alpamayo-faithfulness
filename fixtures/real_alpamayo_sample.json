@@ -1,0 +1,359 @@
+[
+  {
+    "clip_id": "0347d9f9-1493-4954-865d-1d8464e28501",
+    "traces": [
+      {
+        "clip_id": "0347d9f9-1493-4954-865d-1d8464e28501",
+        "sample_index": 0,
+        "raw_text": "Adapt speed for the right curve because the road bends ahead.",
+        "claims": [
+          {
+            "action": "other",
+            "action_polarity": null,
+            "cause": null,
+            "causal_agent": null,
+            "agent_side": "right",
+            "raw": "Adapt speed for the right curve because the road bends ahead."
+          }
+        ]
+      },
+      {
+        "clip_id": "0347d9f9-1493-4954-865d-1d8464e28501",
+        "sample_index": 1,
+        "raw_text": "Nudge left to increase clearance from the parked car on the right shoulder.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "right",
+            "raw": "Nudge left to increase clearance from the parked car on the right shoulder."
+          }
+        ]
+      },
+      {
+        "clip_id": "0347d9f9-1493-4954-865d-1d8464e28501",
+        "sample_index": 2,
+        "raw_text": "Nudge to the left to increase clearance from the parked vehicle on the right.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "right",
+            "raw": "Nudge to the left to increase clearance from the parked vehicle on the right."
+          }
+        ]
+      },
+      {
+        "clip_id": "0347d9f9-1493-4954-865d-1d8464e28501",
+        "sample_index": 3,
+        "raw_text": "Nudge left to increase clearance from the parked car at the right edge",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "right",
+            "raw": "Nudge left to increase clearance from the parked car at the right edge"
+          }
+        ]
+      },
+      {
+        "clip_id": "0347d9f9-1493-4954-865d-1d8464e28501",
+        "sample_index": 4,
+        "raw_text": "Nudge left to increase clearance from the parked car on the right shoulder.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "right",
+            "raw": "Nudge left to increase clearance from the parked car on the right shoulder."
+          }
+        ]
+      }
+    ],
+    "trajectories": [
+      {
+        "longitudinal": "decelerate",
+        "lateral": "nudge_right",
+        "v_start": 14.374346280728108,
+        "v_end": 13.862765260412221,
+        "max_lateral_offset": -6.359549694694579
+      },
+      {
+        "longitudinal": "accelerate",
+        "lateral": "nudge_right",
+        "v_start": 14.36924475996432,
+        "v_end": 15.075515460657872,
+        "max_lateral_offset": -6.7513322196900845
+      },
+      {
+        "longitudinal": "accelerate",
+        "lateral": "nudge_right",
+        "v_start": 14.371417147256889,
+        "v_end": 15.517122909323469,
+        "max_lateral_offset": -6.068129034712911
+      },
+      {
+        "longitudinal": "maintain",
+        "lateral": "nudge_right",
+        "v_start": 14.37802305003303,
+        "v_end": 13.891905901582382,
+        "max_lateral_offset": -5.663048952817917
+      },
+      {
+        "longitudinal": "maintain",
+        "lateral": "nudge_right",
+        "v_start": 14.36697679920603,
+        "v_end": 14.267521113359544,
+        "max_lateral_offset": -6.090458462014794
+      }
+    ],
+    "scene_objects": [],
+    "min_ade": 1.2321865558624268
+  },
+  {
+    "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+    "traces": [
+      {
+        "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+        "sample_index": 0,
+        "raw_text": "Change to the left lane to avoid being forced into the right-turn-only lane and to continue straight through the intersection while maintaining safe clearance from the lead vehicle.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": null,
+            "raw": "Change to the left lane to avoid being forced into the right-turn-only lane and to continue straight through the intersection while maintaining safe clearance from the lead vehicle."
+          }
+        ]
+      },
+      {
+        "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+        "sample_index": 1,
+        "raw_text": "Change to the left lane to pass the slower right\u2011lane vehicle and remain in the through lane as the right lane tapers into a turn pocket, while gently slowing for the upcoming crosswalk and intersection.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": "crosswalk",
+            "causal_agent": "vehicle",
+            "agent_side": "right",
+            "raw": "Change to the left lane to pass the slower right\u2011lane vehicle and remain in the through lane as the right lane tapers into a turn pocket, while gently slowing for the upcoming crosswalk and intersection."
+          }
+        ]
+      },
+      {
+        "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+        "sample_index": 2,
+        "raw_text": "Change lanes to the left to position in the through lane and maintain clearance from the right curb/parked vehicles while proceeding through the intersection.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": null,
+            "raw": "Change lanes to the left to position in the through lane and maintain clearance from the right curb/parked vehicles while proceeding through the intersection."
+          }
+        ]
+      },
+      {
+        "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+        "sample_index": 3,
+        "raw_text": "Change to the left lane to pass the slower lead vehicle while maintaining safe clearance from the right curb and crosswalk area under sun glare.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": "crosswalk",
+            "causal_agent": "vehicle",
+            "agent_side": "right",
+            "raw": "Change to the left lane to pass the slower lead vehicle while maintaining safe clearance from the right curb and crosswalk area under sun glare."
+          }
+        ]
+      },
+      {
+        "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+        "sample_index": 4,
+        "raw_text": "Change lanes to the left to position for the upcoming intersection and maintain safe clearance from the right curb/curb while following the lead vehicle.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": null,
+            "raw": "Change lanes to the left to position for the upcoming intersection and maintain safe clearance from the right curb/curb while following the lead vehicle."
+          }
+        ]
+      }
+    ],
+    "trajectories": [
+      {
+        "longitudinal": "accelerate",
+        "lateral": "nudge_left",
+        "v_start": 12.754038930447784,
+        "v_end": 14.59100315809879,
+        "max_lateral_offset": 1.5584759453777224
+      },
+      {
+        "longitudinal": "decelerate",
+        "lateral": "nudge_left",
+        "v_start": 12.759064030159614,
+        "v_end": 11.751514823457775,
+        "max_lateral_offset": 1.9163892462383956
+      },
+      {
+        "longitudinal": "maintain",
+        "lateral": "nudge_left",
+        "v_start": 12.815582002126678,
+        "v_end": 12.74978325171965,
+        "max_lateral_offset": 1.7290971293114126
+      },
+      {
+        "longitudinal": "decelerate",
+        "lateral": "nudge_left",
+        "v_start": 12.754489791447718,
+        "v_end": 11.696547864833423,
+        "max_lateral_offset": 1.0278637351002544
+      },
+      {
+        "longitudinal": "decelerate",
+        "lateral": "nudge_left",
+        "v_start": 12.751208293893507,
+        "v_end": 12.01679112775265,
+        "max_lateral_offset": 1.2822351071517915
+      }
+    ],
+    "scene_objects": [],
+    "min_ade": 1.097135305404663
+  },
+  {
+    "clip_id": "09ad74a2-a499-4355-a302-da69ff7d0a57",
+    "traces": [
+      {
+        "clip_id": "09ad74a2-a499-4355-a302-da69ff7d0a57",
+        "sample_index": 0,
+        "raw_text": "Keep distance to the lead vehicle because it is directly ahead in the same lane.",
+        "claims": [
+          {
+            "action": "maintain",
+            "action_polarity": null,
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "ahead",
+            "raw": "Keep distance to the lead vehicle because it is directly ahead in the same lane."
+          }
+        ]
+      },
+      {
+        "clip_id": "09ad74a2-a499-4355-a302-da69ff7d0a57",
+        "sample_index": 1,
+        "raw_text": "Keep distance to the lead vehicle because it is directly ahead in the same lane.",
+        "claims": [
+          {
+            "action": "maintain",
+            "action_polarity": null,
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "ahead",
+            "raw": "Keep distance to the lead vehicle because it is directly ahead in the same lane."
+          }
+        ]
+      },
+      {
+        "clip_id": "09ad74a2-a499-4355-a302-da69ff7d0a57",
+        "sample_index": 2,
+        "raw_text": "Keep distance to the lead vehicle since it is ahead in the same lane.",
+        "claims": [
+          {
+            "action": "maintain",
+            "action_polarity": null,
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "ahead",
+            "raw": "Keep distance to the lead vehicle since it is ahead in the same lane."
+          }
+        ]
+      },
+      {
+        "clip_id": "09ad74a2-a499-4355-a302-da69ff7d0a57",
+        "sample_index": 3,
+        "raw_text": "Keep distance to the lead vehicle because it is directly ahead.",
+        "claims": [
+          {
+            "action": "maintain",
+            "action_polarity": null,
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "ahead",
+            "raw": "Keep distance to the lead vehicle because it is directly ahead."
+          }
+        ]
+      },
+      {
+        "clip_id": "09ad74a2-a499-4355-a302-da69ff7d0a57",
+        "sample_index": 4,
+        "raw_text": "Keep distance to the lead vehicle to follow it through the intersection.",
+        "claims": [
+          {
+            "action": "maintain",
+            "action_polarity": null,
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": null,
+            "raw": "Keep distance to the lead vehicle to follow it through the intersection."
+          }
+        ]
+      }
+    ],
+    "trajectories": [
+      {
+        "longitudinal": "accelerate",
+        "lateral": "straight",
+        "v_start": 9.233378977954963,
+        "v_end": 15.399942366095296,
+        "max_lateral_offset": -0.04984982329187915
+      },
+      {
+        "longitudinal": "accelerate",
+        "lateral": "straight",
+        "v_start": 9.229844824383813,
+        "v_end": 16.984145230464883,
+        "max_lateral_offset": -0.10487533165724017
+      },
+      {
+        "longitudinal": "accelerate",
+        "lateral": "straight",
+        "v_start": 9.21128946824279,
+        "v_end": 18.20609139086273,
+        "max_lateral_offset": -0.062386788602452725
+      },
+      {
+        "longitudinal": "accelerate",
+        "lateral": "straight",
+        "v_start": 9.22301051280999,
+        "v_end": 16.97723738604406,
+        "max_lateral_offset": -0.04908451533992775
+      },
+      {
+        "longitudinal": "accelerate",
+        "lateral": "straight",
+        "v_start": 9.198060441412945,
+        "v_end": 15.395406602570247,
+        "max_lateral_offset": -0.04622946202289313
+      }
+    ],
+    "scene_objects": [],
+    "min_ade": 1.20925772190094
+  }
+]

@@ -31,3 +31,9 @@ def load_clip_records(path: str) -> List[ClipRecord]:
 
 def evaluate_records(records: List[ClipRecord]) -> DatasetScorecard:
     return DatasetScorecard(clip_scores=[score_clip(r) for r in records])
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _path = _sys.argv[1] if len(_sys.argv) > 1 else "fixtures/real_alpamayo_sample.json"
+    print(evaluate_records(load_clip_records(_path)).format_table())
