@@ -90,6 +90,24 @@ clip           |  faith |  cons  grnd  stab | contr |  mADE
   checkable action) → honest n/a across the board. Qualitatively noteworthy: across 5
   rollouts the model variously calls it a *left* curve, a *right* curve, or just a curve.
 
+## Parser backends (Phase B)
+
+Traces are parsed into structured claims by one of two interchangeable backends:
+
+- **heuristic** (default) — transparent rules, zero dependencies, fully cold-testable.
+- **llm** — an LLM-as-parser with a controlled-vocabulary prompt and strict JSON output
+  (Anthropic API; `ANTHROPIC_API_KEY`, model via `AFH_LLM_MODEL`, default Haiku). Falls back
+  to the heuristic on any failure, so the harness never breaks because of the LLM.
+
+Measured agreement on the 15 real captured traces (`runners/compare_parsers.py`):
+**action 100 %, polarity 100 %, causal_agent 87 %, agent_side 53 %**. Reading the
+disagreements, the LLM is right almost every time on the subtle fields — a "lead vehicle"
+is `ahead`, "adapt speed for the curve" has no agent hence no agent side, lane-positioning
+causes are environmental. The heuristic is kept as the default (deterministic, free) and
+carries the action axis perfectly; the LLM backend refines agent grounding when a key is
+available. One heuristic bug surfaced by this comparison (side assigned without an agent)
+is fixed.
+
 ## Repository layout
 
 ```

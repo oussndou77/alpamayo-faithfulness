@@ -100,9 +100,13 @@ def _parse_heuristic(raw_text: str) -> List[ParsedClaim]:
 
     # ── causal agent + side ──
     agent = _match_vocab(t, AGENT_SYNONYMS)
-    side = _agent_side_tail(t, agent)            # side word near the AGENT mention
-    if side is None and action != "lateral_nudge":
-        side = _match_vocab(t, SIDE_WORDS)       # fall back to any side word
+    if agent is not None:
+        side = _agent_side_tail(t, agent)            # side word near the AGENT mention
+        if side is None and action != "lateral_nudge":
+            side = _match_vocab(t, SIDE_WORDS)       # fall back to any side word
+    else:
+        side = None   # no agent -> no agent_side (a curve's side is not an agent side;
+                      # bug surfaced by the LLM-parser comparison on real traces)
 
     cause = _match_vocab(t, {c: [c] for c in ENV_CAUSES}) or None
 
