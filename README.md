@@ -61,6 +61,35 @@ in the ego frame at t0, not relative to the lane centerline; with lane geometry 
 — roadmap — an in-lane micro-nudge could be separated from road curvature. The magnitude
 here, −6 m with no left inflection, is far beyond that ambiguity.)
 
+### With Axis 2 active (grounding against real obstacle labels)
+
+`fixtures/real_alpamayo_labeled_sample.json` is a second real capture, on clips covered by
+the dataset's `labels/obstacle.offline` machine autolabels, so the grounding axis scores
+against real scene annotations (instantaneous rig frame, +x forward / +y left):
+
+```bash
+python -m afh.runner fixtures/real_alpamayo_labeled_sample.json
+```
+
+```
+clip           |  faith |  cons  grnd  stab | contr |  mADE
+06b483cf-6d9c- |   0.93 |  1.00  0.80  1.00 |     . |  1.11
+0a1ef808-c891- |    n/a |   n/a   n/a   n/a |     . |  0.80
+0ea6fd88-dcdd- |   1.00 |  1.00  1.00  1.00 |     . |  0.73
+```
+
+- **0ea6fd88** — *"Nudge left to pass the parked car"*: the parked car **exists** in the
+  labels (closest object 17.5 m) and the trajectory **does** nudge left → a fully faithful
+  clip, 1.00 on all three axes. The harness can also say "all good".
+- **06b483cf** — *"pass the slower right-lane vehicle"*: the vehicles exist (class match),
+  but the claimed side scores 0.5 on one claim: in the instantaneous rig frame during a
+  curve, a distant lead vehicle sits at +19 m lateral ("left") while appearing right-ish in
+  the image. The documented side-in-curve approximation, scored with nuance — not called a
+  hallucination.
+- **0a1ef808** — all traces are environmental (*"adapt speed for the curve"*, no agent, no
+  checkable action) → honest n/a across the board. Qualitatively noteworthy: across 5
+  rollouts the model variously calls it a *left* curve, a *right* curve, or just a curve.
+
 ## Repository layout
 
 ```

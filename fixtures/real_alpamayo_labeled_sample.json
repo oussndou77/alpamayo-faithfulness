@@ -1,0 +1,488 @@
+[
+  {
+    "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+    "traces": [
+      {
+        "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+        "sample_index": 0,
+        "raw_text": "Change to the left lane to avoid being forced into the right-turn-only lane and to continue straight through the intersection while maintaining safe clearance from the lead vehicle.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": null,
+            "raw": "Change to the left lane to avoid being forced into the right-turn-only lane and to continue straight through the intersection while maintaining safe clearance from the lead vehicle."
+          }
+        ]
+      },
+      {
+        "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+        "sample_index": 1,
+        "raw_text": "Change to the left lane to pass the slower right\u2011lane vehicle and remain in the through lane as the right lane tapers into a turn pocket, while gently slowing for the upcoming crosswalk and intersection.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": "crosswalk",
+            "causal_agent": "vehicle",
+            "agent_side": "right",
+            "raw": "Change to the left lane to pass the slower right\u2011lane vehicle and remain in the through lane as the right lane tapers into a turn pocket, while gently slowing for the upcoming crosswalk and intersection."
+          }
+        ]
+      },
+      {
+        "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+        "sample_index": 2,
+        "raw_text": "Change lanes to the left to position in the through lane and maintain clearance from the right curb/parked vehicles while proceeding through the intersection.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": null,
+            "raw": "Change lanes to the left to position in the through lane and maintain clearance from the right curb/parked vehicles while proceeding through the intersection."
+          }
+        ]
+      },
+      {
+        "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+        "sample_index": 3,
+        "raw_text": "Change to the left lane to pass the slower lead vehicle while maintaining safe clearance from the right curb and crosswalk area under sun glare.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": "crosswalk",
+            "causal_agent": "vehicle",
+            "agent_side": "right",
+            "raw": "Change to the left lane to pass the slower lead vehicle while maintaining safe clearance from the right curb and crosswalk area under sun glare."
+          }
+        ]
+      },
+      {
+        "clip_id": "06b483cf-6d9c-4b18-b54b-4429c80867e3",
+        "sample_index": 4,
+        "raw_text": "Change lanes to the left to position for the upcoming intersection and maintain safe clearance from the right curb/curb while following the lead vehicle.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": null,
+            "raw": "Change lanes to the left to position for the upcoming intersection and maintain safe clearance from the right curb/curb while following the lead vehicle."
+          }
+        ]
+      }
+    ],
+    "trajectories": [
+      {
+        "longitudinal": "accelerate",
+        "lateral": "nudge_left",
+        "v_start": 12.754194004329706,
+        "v_end": 14.569542571327387,
+        "max_lateral_offset": 1.5641547807026654
+      },
+      {
+        "longitudinal": "decelerate",
+        "lateral": "nudge_left",
+        "v_start": 12.759016028894099,
+        "v_end": 11.723740156613133,
+        "max_lateral_offset": 1.924864273518324
+      },
+      {
+        "longitudinal": "maintain",
+        "lateral": "nudge_left",
+        "v_start": 12.815348535349155,
+        "v_end": 12.7291568664314,
+        "max_lateral_offset": 1.7355816175695509
+      },
+      {
+        "longitudinal": "decelerate",
+        "lateral": "nudge_left",
+        "v_start": 12.754409786658831,
+        "v_end": 11.675386507319606,
+        "max_lateral_offset": 1.0319191189482808
+      },
+      {
+        "longitudinal": "decelerate",
+        "lateral": "nudge_left",
+        "v_start": 12.750870867764599,
+        "v_end": 11.995645188907172,
+        "max_lateral_offset": 1.2845256656873971
+      }
+    ],
+    "scene_objects": [
+      {
+        "object_type": "car",
+        "x": -37.942413330078125,
+        "y": 54.683006286621094,
+        "object_id": 10,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": -19.342605590820312,
+        "y": 45.70052719116211,
+        "object_id": 13,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": -43.23957824707031,
+        "y": 53.458988189697266,
+        "object_id": 15,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": -15.594390869140625,
+        "y": 45.99953842163086,
+        "object_id": 22,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": -11.725387573242188,
+        "y": 46.16585159301758,
+        "object_id": 23,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": -22.84326934814453,
+        "y": 46.210086822509766,
+        "object_id": 24,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": -10.752983093261719,
+        "y": 59.78300094604492,
+        "object_id": 33,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": -13.45376968383789,
+        "y": 59.67356872558594,
+        "object_id": 34,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": -7.687107086181641,
+        "y": 58.9617919921875,
+        "object_id": 36,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": -52.78395080566406,
+        "y": 51.629051208496094,
+        "object_id": 38,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": -15.989501953125,
+        "y": 58.92811965942383,
+        "object_id": 42,
+        "box_2d": null
+      }
+    ],
+    "min_ade": 1.1116387844085693
+  },
+  {
+    "clip_id": "0a1ef808-c891-4da2-919d-c44aa3be5085",
+    "traces": [
+      {
+        "clip_id": "0a1ef808-c891-4da2-919d-c44aa3be5085",
+        "sample_index": 0,
+        "raw_text": "Adapt speed for the curve because the road bends ahead.",
+        "claims": [
+          {
+            "action": "other",
+            "action_polarity": null,
+            "cause": null,
+            "causal_agent": null,
+            "agent_side": "ahead",
+            "raw": "Adapt speed for the curve because the road bends ahead."
+          }
+        ]
+      },
+      {
+        "clip_id": "0a1ef808-c891-4da2-919d-c44aa3be5085",
+        "sample_index": 1,
+        "raw_text": "Adapt speed for the curve because the road bends right ahead.",
+        "claims": [
+          {
+            "action": "other",
+            "action_polarity": null,
+            "cause": null,
+            "causal_agent": null,
+            "agent_side": "right",
+            "raw": "Adapt speed for the curve because the road bends right ahead."
+          }
+        ]
+      },
+      {
+        "clip_id": "0a1ef808-c891-4da2-919d-c44aa3be5085",
+        "sample_index": 2,
+        "raw_text": "Adapt speed for the left curve ahead.",
+        "claims": [
+          {
+            "action": "other",
+            "action_polarity": null,
+            "cause": null,
+            "causal_agent": null,
+            "agent_side": "left",
+            "raw": "Adapt speed for the left curve ahead."
+          }
+        ]
+      },
+      {
+        "clip_id": "0a1ef808-c891-4da2-919d-c44aa3be5085",
+        "sample_index": 3,
+        "raw_text": "Adapt speed for the upcoming left curve.",
+        "claims": [
+          {
+            "action": "other",
+            "action_polarity": null,
+            "cause": null,
+            "causal_agent": null,
+            "agent_side": "left",
+            "raw": "Adapt speed for the upcoming left curve."
+          }
+        ]
+      },
+      {
+        "clip_id": "0a1ef808-c891-4da2-919d-c44aa3be5085",
+        "sample_index": 4,
+        "raw_text": "Adapt speed for the right-hand curve ahead.",
+        "claims": [
+          {
+            "action": "other",
+            "action_polarity": null,
+            "cause": null,
+            "causal_agent": null,
+            "agent_side": "right",
+            "raw": "Adapt speed for the right-hand curve ahead."
+          }
+        ]
+      }
+    ],
+    "trajectories": [
+      {
+        "longitudinal": "maintain",
+        "lateral": "straight",
+        "v_start": 12.235406759239446,
+        "v_end": 12.19257785098269,
+        "max_lateral_offset": 0.37710082984995097
+      },
+      {
+        "longitudinal": "decelerate",
+        "lateral": "straight",
+        "v_start": 12.227783702791308,
+        "v_end": 10.62471618750179,
+        "max_lateral_offset": 0.15200833714334294
+      },
+      {
+        "longitudinal": "decelerate",
+        "lateral": "straight",
+        "v_start": 12.230857761050164,
+        "v_end": 10.904077086923056,
+        "max_lateral_offset": 0.3450951054564939
+      },
+      {
+        "longitudinal": "decelerate",
+        "lateral": "straight",
+        "v_start": 12.239610696795499,
+        "v_end": 9.966504386406504,
+        "max_lateral_offset": 0.08305193885462359
+      },
+      {
+        "longitudinal": "accelerate",
+        "lateral": "straight",
+        "v_start": 12.250588006664806,
+        "v_end": 13.066071829361613,
+        "max_lateral_offset": 0.32028084417106584
+      }
+    ],
+    "scene_objects": [
+      {
+        "object_type": "pedestrian",
+        "x": 12.946186065673828,
+        "y": 17.065439224243164,
+        "object_id": 14,
+        "box_2d": null
+      },
+      {
+        "object_type": "pedestrian",
+        "x": 12.976917266845703,
+        "y": 16.402889251708984,
+        "object_id": 15,
+        "box_2d": null
+      },
+      {
+        "object_type": "pedestrian",
+        "x": 67.37872314453125,
+        "y": 24.70630645751953,
+        "object_id": 64,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": 68.95375061035156,
+        "y": 19.507282257080078,
+        "object_id": 65,
+        "box_2d": null
+      },
+      {
+        "object_type": "pedestrian",
+        "x": 67.56974792480469,
+        "y": 23.966806411743164,
+        "object_id": 70,
+        "box_2d": null
+      }
+    ],
+    "min_ade": 0.7997519969940186
+  },
+  {
+    "clip_id": "0ea6fd88-dcdd-434e-9fa3-56ce0fb35bf2",
+    "traces": [
+      {
+        "clip_id": "0ea6fd88-dcdd-434e-9fa3-56ce0fb35bf2",
+        "sample_index": 0,
+        "raw_text": "Nudge left to overtake the parked car on the right",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "right",
+            "raw": "Nudge left to overtake the parked car on the right"
+          }
+        ]
+      },
+      {
+        "clip_id": "0ea6fd88-dcdd-434e-9fa3-56ce0fb35bf2",
+        "sample_index": 1,
+        "raw_text": "Nudge left to pass the parked car on the right.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "right",
+            "raw": "Nudge left to pass the parked car on the right."
+          }
+        ]
+      },
+      {
+        "clip_id": "0ea6fd88-dcdd-434e-9fa3-56ce0fb35bf2",
+        "sample_index": 2,
+        "raw_text": "Nudge left to overtake the parked car ahead",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "ahead",
+            "raw": "Nudge left to overtake the parked car ahead"
+          }
+        ]
+      },
+      {
+        "clip_id": "0ea6fd88-dcdd-434e-9fa3-56ce0fb35bf2",
+        "sample_index": 3,
+        "raw_text": "Nudge left to pass the parked vehicle ahead.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "ahead",
+            "raw": "Nudge left to pass the parked vehicle ahead."
+          }
+        ]
+      },
+      {
+        "clip_id": "0ea6fd88-dcdd-434e-9fa3-56ce0fb35bf2",
+        "sample_index": 4,
+        "raw_text": "Nudge left to pass the parked vehicle ahead.",
+        "claims": [
+          {
+            "action": "lateral_nudge",
+            "action_polarity": "left",
+            "cause": null,
+            "causal_agent": "vehicle",
+            "agent_side": "ahead",
+            "raw": "Nudge left to pass the parked vehicle ahead."
+          }
+        ]
+      }
+    ],
+    "trajectories": [
+      {
+        "longitudinal": "accelerate",
+        "lateral": "nudge_left",
+        "v_start": 8.404619722895784,
+        "v_end": 10.87912923899383,
+        "max_lateral_offset": 1.3736096646171063
+      },
+      {
+        "longitudinal": "accelerate",
+        "lateral": "nudge_left",
+        "v_start": 8.455453955877388,
+        "v_end": 10.419537007597333,
+        "max_lateral_offset": 1.6002327594906092
+      },
+      {
+        "longitudinal": "maintain",
+        "lateral": "nudge_left",
+        "v_start": 8.416673400975215,
+        "v_end": 8.139629353286955,
+        "max_lateral_offset": 1.168758388608694
+      },
+      {
+        "longitudinal": "accelerate",
+        "lateral": "nudge_left",
+        "v_start": 8.407469745047566,
+        "v_end": 10.305502343725367,
+        "max_lateral_offset": 1.1451243781484663
+      },
+      {
+        "longitudinal": "accelerate",
+        "lateral": "nudge_left",
+        "v_start": 8.441398929893506,
+        "v_end": 12.431903457474093,
+        "max_lateral_offset": 1.4259764309972525
+      }
+    ],
+    "scene_objects": [
+      {
+        "object_type": "car",
+        "x": 14.85833740234375,
+        "y": -9.244616508483887,
+        "object_id": 5,
+        "box_2d": null
+      },
+      {
+        "object_type": "car",
+        "x": 26.315223693847656,
+        "y": -1.0829229354858398,
+        "object_id": 9,
+        "box_2d": null
+      }
+    ],
+    "min_ade": 0.7348766326904297
+  }
+]
