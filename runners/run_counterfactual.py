@@ -33,66 +33,58 @@ import numpy as np
 import torch
 
 
-# ---- frame layout (confirmed from load_physical_aiavdataset source) ----
-# The loader stacks 4 cameras, sorted by camera index, in this fixed order:
-#   0: camera_cross_left_120fov   mount +90° (looks left)
-#   1: camera_front_wide_120fov   mount   0° (looks forward)
-#   2: camera_cross_right_120fov  mount -90° (looks right)
-#   3: camera_front_tele_30fov    mount   0° (narrow forward)
-# We mask the target agent in EVERY camera whose FOV covers its bearing.
-CAMERA_LAYOUT = [
-    {"name": "cross_left_120",  "mount_az": 90.0,  "fov": 120.0},
-    {"name": "front_wide_120",  "mount_az": 0.0,   "fov": 120.0},
-    {"name": "cross_right_120", "mount_az": -90.0, "fov": 120.0},
-    {"name": "front_tele_30",   "mount_az": 0.0,   "fov": 30.0},
-]
+# loader's fixed camera order (sorted by camera index) -> dataset camera_id
+LOADER_CAMS = ["camera_cross_left_120fov", "camera_front_wide_120fov",
+               "camera_cross_right_120fov", "camera_front_tele_30fov"]
 
 
-def probe_layout(clip_id, t0_us):
-    """Dump the shape/semantics of image_frames so masking can be indexed correctly."""
-    from alpamayo_r1.load_physical_aiavdataset import load_physical_aiavdataset
-    data = load_physical_aiavdataset(clip_id, t0_us=t0_us)
-    f = data["image_frames"]
-    print(f"image_frames tensor: shape={tuple(f.shape)} dtype={f.dtype} "
-          f"min={f.min().item():.3f} max={f.max().item():.3f}")
-    print("interpretation: (n_cameras, n_timesteps, C, H, W) before flatten(0,1)")
-    print(f"  -> n_cameras={f.shape[0]}  n_timesteps={f.shape[1]}  H={f.shape[-2]} W={f.shape[-1]}")
-    print("Loader order (sorted by camera index): 0=cross_left 1=front_wide 2=cross_right 3=front_tele")
-    return f.shape
-
-
-def occlude_frames(frames, agent_x, agent_y, band_frac=0.22, layout=CAMERA_LAYOUT):
+def occlude_frames(frames, agent_x, agent_y, agent_z, size_x, size_y, size_z,
+                   intrinsics, extrinsics, pad=1.6):
     """
-    Paint a black vertical band over the target agent's bearing in EVERY camera whose
-    field of view covers that bearing (an object near a 120° camera edge is often seen
-    by two cameras — masking only one leaves it visible to the model).
+    Mask the target agent by PROJECTING its 3D cuboid into every camera that sees it
+    (devkit FTheta fisheye model + extrinsics), then painting a black box over the
+    projected extent. This is exact on the 120° fisheye cameras, unlike a linear
+    azimuth approximation.
 
     frames: tensor (n_cameras, n_timesteps, C, H, W). Returns a masked copy.
-    Uses each camera's real mount azimuth (from the loader's fixed order); the agent's
-    world bearing is atan2(y, x) (+y left -> +az), and its offset within a camera is
-    (world_az - mount_az), mapped across that camera's FOV to a horizontal fraction.
+    The box is sized from the cuboid's 8 corners projected into the image, padded by
+    `pad` so the whole vehicle (not just its center) is covered.
     """
     out = frames.clone()
-    world_az = math.degrees(math.atan2(agent_y, agent_x))     # +y left -> +az left
-    W = out.shape[-1]
+    H, W = out.shape[-2], out.shape[-1]
     dark = out.min()
-    masked_cams = []
-    for cam_idx in range(min(out.shape[0], len(layout))):
-        cam = layout[cam_idx]
-        rel_az = world_az - cam["mount_az"]                   # bearing inside this camera
-        rel_az = (rel_az + 180.0) % 360.0 - 180.0             # wrap to [-180,180]
-        if abs(rel_az) > cam["fov"] / 2.0:
-            continue                                          # agent not in this camera's FOV
-        u = 0.5 - (rel_az / cam["fov"])                       # +rel_az (left) -> left of image
-        center = int(np.clip(u, 0.0, 1.0) * W)
-        bw = max(1, int(band_frac * W))
-        lo, hi = max(0, center - bw // 2), min(W, center + bw // 2)
-        out[cam_idx, :, :, :, lo:hi] = dark
-        masked_cams.append(f"cam{cam_idx}({cam['name']}) cols[{lo}:{hi}]")
-    if masked_cams:
-        print(f"[occlude] agent world_az={world_az:.1f}° -> masked {', '.join(masked_cams)}")
+    center = np.array([agent_x, agent_y, agent_z], dtype=float)
+    # 8 cuboid corners in rig frame (axis-aligned; orientation ignored -> pad covers it)
+    hs = np.array([size_x, size_y, size_z]) / 2.0
+    corners = center + np.array([[sx*hs[0], sy*hs[1], sz*hs[2]]
+                                 for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
+    masked = []
+    for cam_idx in range(min(out.shape[0], len(LOADER_CAMS))):
+        cam_id = LOADER_CAMS[cam_idx]
+        model = intrinsics.camera_models.get(cam_id)
+        pose = extrinsics.sensor_poses.get(cam_id)
+        if model is None or pose is None:
+            continue
+        pc = np.array([pose.inv().apply(c) for c in corners])   # rig -> camera frame
+        if (pc[:, 2] <= 0).all():
+            continue                                            # entirely behind camera
+        pc = pc[pc[:, 2] > 0]                                   # keep points in front
+        px = model.ray2pixel(pc)
+        x0, y0 = px[:, 0].min(), px[:, 1].min()
+        x1, y1 = px[:, 0].max(), px[:, 1].max()
+        # pad around the projected box
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        bw, bh = (x1 - x0) * pad, (y1 - y0) * pad
+        lo_x, hi_x = int(max(0, cx - bw / 2)), int(min(W, cx + bw / 2))
+        lo_y, hi_y = int(max(0, cy - bh / 2)), int(min(H, cy + bh / 2))
+        if lo_x >= hi_x or lo_y >= hi_y:
+            continue
+        out[cam_idx, :, :, lo_y:hi_y, lo_x:hi_x] = dark
+        masked.append(f"cam{cam_idx}({cam_id.split('_')[1]}) box[{lo_x}:{hi_x},{lo_y}:{hi_y}]")
+    if masked:
+        print(f"[occlude] agent projected & masked in {', '.join(masked)}")
     else:
-        print(f"[occlude] WARNING agent world_az={world_az:.1f}° not covered by any camera FOV")
+        print(f"[occlude] WARNING agent not visible in any camera")
     return out
 
 
@@ -136,36 +128,60 @@ def main():
     ap.add_argument("--agent", default="vehicle", help="target causal agent type")
     ap.add_argument("--agent-x", type=float, help="agent rig x (forward, m)")
     ap.add_argument("--agent-y", type=float, help="agent rig y (left, m)")
+    ap.add_argument("--agent-z", type=float, default=0.8, help="agent rig z (up, m)")
+    ap.add_argument("--size-x", type=float, default=4.6, help="cuboid length (m)")
+    ap.add_argument("--size-y", type=float, default=1.9, help="cuboid width (m)")
+    ap.add_argument("--size-z", type=float, default=1.7, help="cuboid height (m)")
     ap.add_argument("--k-rollouts", type=int, default=5)
     ap.add_argument("--t0-us", type=int, default=5_100_000)
     ap.add_argument("--probe", action="store_true", help="dump frame layout and exit")
+    ap.add_argument("--dump-mask", action="store_true",
+                    help="save masked cameras as PNG and exit (verify before spending rollouts)")
     ap.add_argument("--out", default="outputs/cf_experiment.json")
     args = ap.parse_args()
 
+    import physical_ai_av
+    from alpamayo_r1.load_physical_aiavdataset import load_physical_aiavdataset
+
     if args.probe:
-        probe_layout(args.clip, args.t0_us)
+        data = load_physical_aiavdataset(args.clip, t0_us=args.t0_us)
+        f = data["image_frames"]
+        print(f"image_frames: shape={tuple(f.shape)} (n_cam, n_t, C, H, W)  dtype={f.dtype}")
+        print("loader order: 0=cross_left 1=front_wide 2=cross_right 3=front_tele")
         return
 
     if args.agent_x is None or args.agent_y is None:
-        raise SystemExit("provide --agent-x and --agent-y (from the Axis-2 scene objects). "
-                         "Run run_inference.py first to see the labeled positions.")
+        raise SystemExit("provide --agent-x/--agent-y (from the Axis-2 scene objects).")
+
+    avdi = physical_ai_av.PhysicalAIAVDatasetInterface()
+    intrinsics = avdi.get_clip_feature(args.clip, "camera_intrinsics", maybe_stream=True)
+    extrinsics = avdi.get_clip_feature(args.clip, "sensor_extrinsics", maybe_stream=True)
+    data = load_physical_aiavdataset(args.clip, t0_us=args.t0_us)
+    frames = data["image_frames"]
+
+    masked = occlude_frames(frames, args.agent_x, args.agent_y, args.agent_z,
+                            args.size_x, args.size_y, args.size_z, intrinsics, extrinsics)
+
+    if args.dump_mask:
+        from PIL import Image
+        for cam in range(frames.shape[0]):
+            img = masked[cam, -1].permute(1, 2, 0).cpu().numpy().astype("uint8")
+            Image.fromarray(img).save(f"maskcheck_cam{cam}.png")
+            print(f"saved maskcheck_cam{cam}.png")
+        print("Inspect the PNGs; if the agent is fully covered, re-run without --dump-mask.")
+        return
 
     import alpamayo_r1.helper as helper
     from alpamayo_r1.model import AlpamayoR1
-    from alpamayo_r1.load_physical_aiavdataset import load_physical_aiavdataset
     from afh.axes.counterfactual import score_counterfactual
 
     model = AlpamayoR1.from_pretrained("nvidia/Alpamayo-R1-10B", dtype=torch.bfloat16,
                                        attn_implementation="eager").to("cuda")
     processor = helper.get_processor(model.tokenizer)
 
-    data = load_physical_aiavdataset(args.clip, t0_us=args.t0_us)
-    frames = data["image_frames"]
-
     print("=== BASELINE ===")
     base_tr, base_tj = run_side(frames, data, helper, processor, model, args.k_rollouts)
     print("=== COUNTERFACTUAL (agent occluded) ===")
-    masked = occlude_frames(frames, args.agent_x, args.agent_y)
     cf_tr, cf_tj = run_side(masked, data, helper, processor, model, args.k_rollouts)
 
     result = score_counterfactual(args.clip, args.agent, base_tr, base_tj, cf_tr, cf_tj)
