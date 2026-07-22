@@ -33,10 +33,19 @@ import numpy as np
 import torch
 
 
-# ---- frame layout (filled by --probe; front_wide is the main forward camera) ----
-# The PhysicalAI rig has 7 cameras; forward bearing (azimuth ~0) is covered by
-# camera_front_wide_120fov. A 120° FOV camera spans ~[-60°, +60°] in azimuth.
-FRONT_WIDE_FOV_DEG = 120.0
+# ---- frame layout (confirmed from load_physical_aiavdataset source) ----
+# The loader stacks 4 cameras, sorted by camera index, in this fixed order:
+#   0: camera_cross_left_120fov   mount +90° (looks left)
+#   1: camera_front_wide_120fov   mount   0° (looks forward)
+#   2: camera_cross_right_120fov  mount -90° (looks right)
+#   3: camera_front_tele_30fov    mount   0° (narrow forward)
+# We mask the target agent in EVERY camera whose FOV covers its bearing.
+CAMERA_LAYOUT = [
+    {"name": "cross_left_120",  "mount_az": 90.0,  "fov": 120.0},
+    {"name": "front_wide_120",  "mount_az": 0.0,   "fov": 120.0},
+    {"name": "cross_right_120", "mount_az": -90.0, "fov": 120.0},
+    {"name": "front_tele_30",   "mount_az": 0.0,   "fov": 30.0},
+]
 
 
 def probe_layout(clip_id, t0_us):
@@ -48,35 +57,42 @@ def probe_layout(clip_id, t0_us):
           f"min={f.min().item():.3f} max={f.max().item():.3f}")
     print("interpretation: (n_cameras, n_timesteps, C, H, W) before flatten(0,1)")
     print(f"  -> n_cameras={f.shape[0]}  n_timesteps={f.shape[1]}  H={f.shape[-2]} W={f.shape[-1]}")
-    print("Camera order is the dataset's canonical order; front_wide is typically index 0.")
-    print("Re-run without --probe once you've confirmed the front camera index.")
+    print("Loader order (sorted by camera index): 0=cross_left 1=front_wide 2=cross_right 3=front_tele")
     return f.shape
 
 
-def occlude_frames(frames, agent_x, agent_y, front_cam_index=0,
-                   fov_deg=FRONT_WIDE_FOV_DEG, band_frac=0.22):
+def occlude_frames(frames, agent_x, agent_y, band_frac=0.22, layout=CAMERA_LAYOUT):
     """
-    Paint a black vertical band over the target agent's bearing in the front camera.
+    Paint a black vertical band over the target agent's bearing in EVERY camera whose
+    field of view covers that bearing (an object near a 120° camera edge is often seen
+    by two cameras — masking only one leaves it visible to the model).
 
-    frames: tensor (n_cameras, n_timesteps, C, H, W), values in whatever range the
-            processor expects (we write the tensor min = darkest).
-    Returns a masked copy; leaves the original untouched.
+    frames: tensor (n_cameras, n_timesteps, C, H, W). Returns a masked copy.
+    Uses each camera's real mount azimuth (from the loader's fixed order); the agent's
+    world bearing is atan2(y, x) (+y left -> +az), and its offset within a camera is
+    (world_az - mount_az), mapped across that camera's FOV to a horizontal fraction.
     """
     out = frames.clone()
-    az = math.degrees(math.atan2(agent_y, agent_x))     # +y left -> +az left
-    half = fov_deg / 2.0
-    if abs(az) > half:
-        print(f"[occlude] azimuth {az:.1f}° outside front FOV ±{half:.0f}° — "
-              f"front-camera masking will miss it (v2: use the side camera).")
-    # map azimuth in [-half, +half] to horizontal fraction [0,1]; +az (left) -> left of image
-    u = 0.5 - (az / fov_deg)
+    world_az = math.degrees(math.atan2(agent_y, agent_x))     # +y left -> +az left
     W = out.shape[-1]
-    center = int(np.clip(u, 0.0, 1.0) * W)
-    bw = max(1, int(band_frac * W))
-    lo, hi = max(0, center - bw // 2), min(W, center + bw // 2)
     dark = out.min()
-    out[front_cam_index, :, :, :, lo:hi] = dark
-    print(f"[occlude] agent az={az:.1f}° -> band cols [{lo}:{hi}] of {W} on cam {front_cam_index}")
+    masked_cams = []
+    for cam_idx in range(min(out.shape[0], len(layout))):
+        cam = layout[cam_idx]
+        rel_az = world_az - cam["mount_az"]                   # bearing inside this camera
+        rel_az = (rel_az + 180.0) % 360.0 - 180.0             # wrap to [-180,180]
+        if abs(rel_az) > cam["fov"] / 2.0:
+            continue                                          # agent not in this camera's FOV
+        u = 0.5 - (rel_az / cam["fov"])                       # +rel_az (left) -> left of image
+        center = int(np.clip(u, 0.0, 1.0) * W)
+        bw = max(1, int(band_frac * W))
+        lo, hi = max(0, center - bw // 2), min(W, center + bw // 2)
+        out[cam_idx, :, :, :, lo:hi] = dark
+        masked_cams.append(f"cam{cam_idx}({cam['name']}) cols[{lo}:{hi}]")
+    if masked_cams:
+        print(f"[occlude] agent world_az={world_az:.1f}° -> masked {', '.join(masked_cams)}")
+    else:
+        print(f"[occlude] WARNING agent world_az={world_az:.1f}° not covered by any camera FOV")
     return out
 
 
@@ -120,7 +136,6 @@ def main():
     ap.add_argument("--agent", default="vehicle", help="target causal agent type")
     ap.add_argument("--agent-x", type=float, help="agent rig x (forward, m)")
     ap.add_argument("--agent-y", type=float, help="agent rig y (left, m)")
-    ap.add_argument("--front-cam-index", type=int, default=0)
     ap.add_argument("--k-rollouts", type=int, default=5)
     ap.add_argument("--t0-us", type=int, default=5_100_000)
     ap.add_argument("--probe", action="store_true", help="dump frame layout and exit")
@@ -150,8 +165,7 @@ def main():
     print("=== BASELINE ===")
     base_tr, base_tj = run_side(frames, data, helper, processor, model, args.k_rollouts)
     print("=== COUNTERFACTUAL (agent occluded) ===")
-    masked = occlude_frames(frames, args.agent_x, args.agent_y,
-                            front_cam_index=args.front_cam_index)
+    masked = occlude_frames(frames, args.agent_x, args.agent_y)
     cf_tr, cf_tj = run_side(masked, data, helper, processor, model, args.k_rollouts)
 
     result = score_counterfactual(args.clip, args.agent, base_tr, base_tj, cf_tr, cf_tj)
