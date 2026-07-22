@@ -13,6 +13,8 @@ Two intended backends (configurable):
 The controlled vocabularies live here so axes can rely on normalized values.
 """
 
+import json
+import os
 from typing import List
 from afh.trace import ParsedClaim, CoCTrace
 
@@ -142,9 +144,120 @@ def _agent_side_tail(text: str, agent) -> str:
 
 def _parse_llm(raw_text: str) -> List[ParsedClaim]:
     """
-    TODO (Phase B): LLM-as-judge with strict JSON-schema output, mirroring the
-    structured-extraction approach used in ARIA. Should return the same ParsedClaim
-    shape so axes are backend-agnostic. Kept out of the default path so the harness
-    has zero network/credential dependency for cold testing.
+    Phase B backend: LLM-as-parser with structured JSON output.
+
+    Sends the raw CoC text to an LLM (Anthropic API) with the controlled vocabularies
+    and few-shot examples drawn from real Alpamayo traces, and expects a JSON array of
+    claims. Same output contract as the heuristic parser, so all axes stay backend-agnostic.
+
+    Config (env):
+      ANTHROPIC_API_KEY  — required to use this backend
+      AFH_LLM_MODEL      — model id (default: claude-haiku-4-5-20251001, cheap + fast)
+
+    Robustness: on any API/JSON/vocab failure the call falls back to the heuristic
+    parser with a printed warning — the harness never crashes because of the LLM.
     """
-    raise NotImplementedError("LLM parser backend not implemented yet (Phase B).")
+    try:
+        return _parse_llm_strict(raw_text)
+    except Exception as e:
+        print(f"[parser.llm] fallback to heuristic ({type(e).__name__}: {str(e)[:120]})")
+        return _parse_heuristic(raw_text)
+
+
+_LLM_SYSTEM = """You extract structured driving claims from an autonomous-driving model's \
+Chain-of-Causation text. Answer ONLY with a JSON array, no prose, no markdown fences.
+
+Each claim object has exactly these keys:
+  action: one of "decelerate" | "accelerate" | "lateral_nudge" | "maintain" | "stop" | "other"
+  action_polarity: for lateral_nudge only, "left" or "right"; else null
+  causal_agent: one of "pedestrian" | "cyclist" | "vehicle" | "animal" | null (null if the \
+cause is environmental like a curve, a red light, or lane positioning)
+  agent_side: where the agent is relative to the ego: "left" | "ahead" | "right" | null
+  cause: a short reason phrase copied or condensed from the text, or null
+
+Rules:
+- action is the EGO's maneuver, not the agent's motion.
+- "keep distance" / "follow the lead vehicle" is car-following -> action "maintain".
+- "change lanes to the left" / "nudge left" -> lateral_nudge with polarity "left".
+- agent_side is the side where the AGENT is (e.g. "parked car on the right" -> "right"), \
+not the direction of the ego's maneuver.
+- One claim per distinct assertion; merge exact repetitions.
+
+Examples:
+Input: "Nudge left to increase clearance from the parked car on the right shoulder."
+Output: [{"action":"lateral_nudge","action_polarity":"left","causal_agent":"vehicle",\
+"agent_side":"right","cause":"increase clearance from the parked car"}]
+Input: "Keep distance to the lead vehicle because it is directly ahead in the same lane."
+Output: [{"action":"maintain","action_polarity":null,"causal_agent":"vehicle",\
+"agent_side":"ahead","cause":"lead vehicle directly ahead"}]
+Input: "Adapt speed for the left curve ahead."
+Output: [{"action":"other","action_polarity":null,"causal_agent":null,\
+"agent_side":null,"cause":"left curve ahead"}]"""
+
+_ALLOWED = {
+    "action": {"decelerate", "accelerate", "lateral_nudge", "maintain", "stop", "other"},
+    "action_polarity": {"left", "right", None},
+    "causal_agent": {"pedestrian", "cyclist", "vehicle", "animal", None},
+    "agent_side": {"left", "ahead", "right", None},
+}
+
+
+def _call_anthropic(system: str, user: str, model: str, api_key: str) -> str:
+    """Minimal Anthropic Messages API call (stdlib only; no new dependency)."""
+    import urllib.request
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        method="POST",
+        headers={
+            "content-type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        data=json.dumps({
+            "model": model,
+            "max_tokens": 1024,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }).encode("utf-8"),
+    )
+    with urllib.request.urlopen(req, timeout=60) as r:
+        payload = json.loads(r.read().decode("utf-8"))
+    return "".join(b.get("text", "") for b in payload.get("content", [])
+                   if b.get("type") == "text")
+
+
+def _parse_llm_strict(raw_text: str) -> List[ParsedClaim]:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+    model = os.environ.get("AFH_LLM_MODEL", "claude-haiku-4-5-20251001")
+
+    text = raw_text.strip()
+    if not text:
+        return []
+    out = _call_anthropic(_LLM_SYSTEM, text, model, api_key).strip()
+    if out.startswith("```"):                      # strip accidental fences
+        out = out.strip("`")
+        out = out[out.find("["):]
+    data = json.loads(out)
+    if not isinstance(data, list):
+        raise ValueError("LLM did not return a JSON array")
+
+    claims = []
+    for c in data:
+        action = c.get("action")
+        if action not in _ALLOWED["action"]:
+            raise ValueError(f"invalid action {action!r}")
+        pol = c.get("action_polarity")
+        if pol not in _ALLOWED["action_polarity"]:
+            pol = None
+        agent = c.get("causal_agent")
+        if agent not in _ALLOWED["causal_agent"]:
+            agent = None
+        side = c.get("agent_side")
+        if side not in _ALLOWED["agent_side"]:
+            side = None
+        claims.append(ParsedClaim(action=action, action_polarity=pol,
+                                  cause=c.get("cause") or None,
+                                  causal_agent=agent, agent_side=side, raw=text))
+    return claims
