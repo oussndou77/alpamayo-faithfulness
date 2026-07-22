@@ -27,6 +27,10 @@ def claim_grounding(claim: ParsedClaim, scene: List[SceneObject]) -> Optional[fl
     if claim.is_environmental() or not claim.causal_agent:
         return None
 
+    if not scene:
+        return None      # no scene annotations available (axis 2 not wired yet) -> not evaluable,
+                         # NOT a hallucination; returning 0.0 here would falsely tank the score
+
     matches = [o for o in scene if _class_matches(claim.causal_agent, o.object_type)]
     if not matches:
         return HALLUCINATED                 # named an agent that isn't in the scene

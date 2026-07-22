@@ -34,7 +34,8 @@ ACCEL_WORDS = ["accelerate", "speed up", "resume speed"]
 FOLLOW_WORDS = ["keep distance", "keep your distance", "keep a safe distance",
                 "maintain distance", "maintain speed", "keep pace",
                 "follow the lead", "following the lead"]
-LATERAL_WORDS = ["nudge", "merge", "shift", "move over", "steer", "swerve", "change lane"]
+LATERAL_WORDS = ["nudge", "merge", "shift", "move over", "steer", "swerve", "change lane",
+                 "change to the left", "change to the right"]
 ENV_CAUSES = ["red light", "traffic light", "stop sign", "crosswalk", "green light", "weather"]
 
 
