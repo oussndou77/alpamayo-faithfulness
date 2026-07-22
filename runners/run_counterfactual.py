@@ -28,9 +28,14 @@ import copy
 import json
 import math
 import os
+import sys
 
 import numpy as np
 import torch
+
+# make the harness package (afh/) and sibling runners importable regardless of CWD
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 
 # loader's fixed camera order (sorted by camera index) -> dataset camera_id
