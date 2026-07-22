@@ -24,8 +24,16 @@ AGENT_SYNONYMS = {
     "animal": ["animal", "dog", "deer"],
 }
 SIDE_WORDS = {"left": ["left"], "right": ["right"], "ahead": ["ahead", "front", "in front"]}
-DECEL_WORDS = ["slow", "brake", "decelerate", "yield", "stop", "keep distance", "slow down"]
+DECEL_WORDS = ["slow", "brake", "decelerate", "yield", "stop", "slow down"]
 ACCEL_WORDS = ["accelerate", "speed up", "resume speed"]
+# Car-following phrases: "keep distance to the lead vehicle" is NOT a braking command,
+# it's a following behavior (the ego matches the lead and may speed up, hold, or slow).
+# It is therefore not a checkable accel/decel assertion -> treat as "maintain" (unsupported),
+# rather than forcing "decelerate" and producing a false contradiction against a trajectory
+# that actually accelerates to follow. (A genuine "slow down"/"brake" still hits DECEL above.)
+FOLLOW_WORDS = ["keep distance", "keep your distance", "keep a safe distance",
+                "maintain distance", "maintain speed", "keep pace",
+                "follow the lead", "following the lead"]
 LATERAL_WORDS = ["nudge", "merge", "shift", "move over", "steer", "swerve", "change lane"]
 ENV_CAUSES = ["red light", "traffic light", "stop sign", "crosswalk", "green light", "weather"]
 
@@ -80,6 +88,12 @@ def _parse_heuristic(raw_text: str) -> List[ParsedClaim]:
         action = "stop"
     elif any(w in t for w in ACCEL_WORDS):
         action = "accelerate"
+    elif any(w in t for w in FOLLOW_WORDS):
+        # car-following ("keep distance to the lead vehicle") -> maintain: a following
+        # claim doesn't assert a specific accel/decel, so it's left unchecked rather than
+        # scored as a contradiction. Placed after DECEL so "keep distance AND slow down"
+        # still reads as a genuine deceleration.
+        action = "maintain"
 
     # ── causal agent + side ──
     agent = _match_vocab(t, AGENT_SYNONYMS)
