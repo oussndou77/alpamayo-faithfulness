@@ -198,8 +198,8 @@ def main():
         print("Inspect the PNGs; if the agent is fully covered, re-run without --dump-mask.")
         return
 
-    import alpamayo_r1.helper as helper
-    from alpamayo_r1.model import AlpamayoR1
+    from alpamayo_r1 import helper
+    from alpamayo_r1.models.alpamayo_r1 import AlpamayoR1
     from afh.axes.counterfactual import score_counterfactual
 
     model = AlpamayoR1.from_pretrained("nvidia/Alpamayo-R1-10B", dtype=torch.bfloat16,
