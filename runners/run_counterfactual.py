@@ -38,26 +38,37 @@ LOADER_CAMS = ["camera_cross_left_120fov", "camera_front_wide_120fov",
                "camera_cross_right_120fov", "camera_front_tele_30fov"]
 
 
-def occlude_frames(frames, agent_x, agent_y, agent_z, size_x, size_y, size_z,
+def _interp_track_xyz(track_df, t_us):
+    """Linear-interpolate a track's rig xyz at time t_us (track_df sorted by timestamp)."""
+    tx = track_df["timestamp_us"].to_numpy(dtype=float)
+    x = np.interp(t_us, tx, track_df["center_x"].to_numpy(dtype=float))
+    y = np.interp(t_us, tx, track_df["center_y"].to_numpy(dtype=float))
+    z = np.interp(t_us, tx, track_df["center_z"].to_numpy(dtype=float))
+    return np.array([x, y, z])
+
+
+def occlude_frames(frames, frame_timestamps, track_df, size_xyz,
                    intrinsics, extrinsics, pad=1.6):
     """
-    Mask the target agent by PROJECTING its 3D cuboid into every camera that sees it
-    (devkit FTheta fisheye model + extrinsics), then painting a black box over the
-    projected extent. This is exact on the 120° fisheye cameras, unlike a linear
-    azimuth approximation.
+    Mask the target track by projecting its 3D cuboid into every camera that sees it,
+    at the ACTUAL timestamp of each camera frame.
 
-    frames: tensor (n_cameras, n_timesteps, C, H, W). Returns a masked copy.
-    The box is sized from the cuboid's 8 corners projected into the image, padded by
-    `pad` so the whole vehicle (not just its center) is covered.
+    Two subtleties learned the hard way on this dataset:
+      * the 4 cameras are NOT time-synchronized (front_wide[-1]=5.076s while
+        cross_left[-1]=5.094s), and the last frame is not exactly t0 — so a fixed t0
+        position mis-projects. We interpolate the track to each camera's own timestamp.
+      * obstacle-label track_id is a STRING; the caller must filter with str ids.
+
+    frames: (n_cam, n_t, C, H, W). frame_timestamps: (n_cam, n_t) absolute us.
+    track_df: this track's obstacle rows (already filtered), sorted by timestamp.
+    size_xyz: (size_x, size_y, size_z) cuboid extents in meters.
+    Returns a masked copy.
     """
     out = frames.clone()
     H, W = out.shape[-2], out.shape[-1]
     dark = out.min()
-    center = np.array([agent_x, agent_y, agent_z], dtype=float)
-    # 8 cuboid corners in rig frame (axis-aligned; orientation ignored -> pad covers it)
-    hs = np.array([size_x, size_y, size_z]) / 2.0
-    corners = center + np.array([[sx*hs[0], sy*hs[1], sz*hs[2]]
-                                 for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
+    hs = np.array(size_xyz) / 2.0
+    corner_signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
     masked = []
     for cam_idx in range(min(out.shape[0], len(LOADER_CAMS))):
         cam_id = LOADER_CAMS[cam_idx]
@@ -65,26 +76,31 @@ def occlude_frames(frames, agent_x, agent_y, agent_z, size_x, size_y, size_z,
         pose = extrinsics.sensor_poses.get(cam_id)
         if model is None or pose is None:
             continue
-        pc = np.array([pose.inv().apply(c) for c in corners])   # rig -> camera frame
-        if (pc[:, 2] <= 0).all():
-            continue                                            # entirely behind camera
-        pc = pc[pc[:, 2] > 0]                                   # keep points in front
-        px = model.ray2pixel(pc)
-        x0, y0 = px[:, 0].min(), px[:, 1].min()
-        x1, y1 = px[:, 0].max(), px[:, 1].max()
-        # pad around the projected box
-        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        bw, bh = (x1 - x0) * pad, (y1 - y0) * pad
-        lo_x, hi_x = int(max(0, cx - bw / 2)), int(min(W, cx + bw / 2))
-        lo_y, hi_y = int(max(0, cy - bh / 2)), int(min(H, cy + bh / 2))
-        if lo_x >= hi_x or lo_y >= hi_y:
-            continue
-        out[cam_idx, :, :, lo_y:hi_y, lo_x:hi_x] = dark
-        masked.append(f"cam{cam_idx}({cam_id.split('_')[1]}) box[{lo_x}:{hi_x},{lo_y}:{hi_y}]")
+        # mask every time-step of this camera at its own timestamp
+        boxes = []
+        for t_idx in range(out.shape[1]):
+            t_us = float(frame_timestamps[cam_idx, t_idx])
+            center = _interp_track_xyz(track_df, t_us)
+            corners = center + corner_signs * hs
+            pc = np.array([pose.inv().apply(c) for c in corners])
+            if (pc[:, 2] <= 0).all():
+                continue
+            pc = pc[pc[:, 2] > 0]
+            px = model.ray2pixel(pc)
+            x0, y0, x1, y1 = px[:, 0].min(), px[:, 1].min(), px[:, 0].max(), px[:, 1].max()
+            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+            bw, bh = (x1 - x0) * pad, (y1 - y0) * pad
+            lo_x, hi_x = int(max(0, cx - bw / 2)), int(min(W, cx + bw / 2))
+            lo_y, hi_y = int(max(0, cy - bh / 2)), int(min(H, cy + bh / 2))
+            if lo_x < hi_x and lo_y < hi_y:
+                out[cam_idx, t_idx, :, lo_y:hi_y, lo_x:hi_x] = dark
+                boxes.append(t_idx)
+        if boxes:
+            masked.append(f"cam{cam_idx}({cam_id.split('_')[1]}) t={boxes}")
     if masked:
-        print(f"[occlude] agent projected & masked in {', '.join(masked)}")
+        print(f"[occlude] projected & masked: {', '.join(masked)}")
     else:
-        print(f"[occlude] WARNING agent not visible in any camera")
+        print("[occlude] WARNING agent not visible in any camera/timestep")
     return out
 
 
@@ -126,12 +142,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--clip", required=True)
     ap.add_argument("--agent", default="vehicle", help="target causal agent type")
-    ap.add_argument("--agent-x", type=float, help="agent rig x (forward, m)")
-    ap.add_argument("--agent-y", type=float, help="agent rig y (left, m)")
-    ap.add_argument("--agent-z", type=float, default=0.8, help="agent rig z (up, m)")
-    ap.add_argument("--size-x", type=float, default=4.6, help="cuboid length (m)")
-    ap.add_argument("--size-y", type=float, default=1.9, help="cuboid width (m)")
-    ap.add_argument("--size-z", type=float, default=1.7, help="cuboid height (m)")
+    ap.add_argument("--track-id", help="obstacle track_id to occlude (string, e.g. '9')")
+    ap.add_argument("--size-x", type=float, default=None, help="cuboid length override (m)")
+    ap.add_argument("--size-y", type=float, default=None, help="cuboid width override (m)")
+    ap.add_argument("--size-z", type=float, default=None, help="cuboid height override (m)")
     ap.add_argument("--k-rollouts", type=int, default=5)
     ap.add_argument("--t0-us", type=int, default=5_100_000)
     ap.add_argument("--probe", action="store_true", help="dump frame layout and exit")
@@ -150,17 +164,30 @@ def main():
         print("loader order: 0=cross_left 1=front_wide 2=cross_right 3=front_tele")
         return
 
-    if args.agent_x is None or args.agent_y is None:
-        raise SystemExit("provide --agent-x/--agent-y (from the Axis-2 scene objects).")
+    if args.track_id is None:
+        raise SystemExit("provide --track-id (the obstacle track to occlude; run run_inference "
+                         "to see labeled objects, or list tracks near t0).")
 
     avdi = physical_ai_av.PhysicalAIAVDatasetInterface()
     intrinsics = avdi.get_clip_feature(args.clip, "camera_intrinsics", maybe_stream=True)
     extrinsics = avdi.get_clip_feature(args.clip, "sensor_extrinsics", maybe_stream=True)
+    obst = avdi.get_clip_feature(args.clip, "obstacle.offline", maybe_stream=True)["obstacle.offline"]
+    obst["track_id"] = obst["track_id"].astype(str)      # track_id is a STRING in the labels
+    track_df = obst[obst["track_id"] == str(args.track_id)].sort_values("timestamp_us")
+    if track_df.empty:
+        raise SystemExit(f"track_id {args.track_id!r} not found. Present: "
+                         f"{sorted(obst['track_id'].unique().tolist())}")
+    # cuboid size: median of the track's own labels, unless overridden
+    sx = args.size_x if args.size_x is not None else float(track_df["size_x"].median())
+    sy = args.size_y if args.size_y is not None else float(track_df["size_y"].median())
+    sz = args.size_z if args.size_z is not None else float(track_df["size_z"].median())
+    print(f"target track {args.track_id}: {len(track_df)} obs, cuboid ~{sx:.1f}x{sy:.1f}x{sz:.1f}m")
+
     data = load_physical_aiavdataset(args.clip, t0_us=args.t0_us)
     frames = data["image_frames"]
+    ts = data["absolute_timestamps"].cpu().numpy()
 
-    masked = occlude_frames(frames, args.agent_x, args.agent_y, args.agent_z,
-                            args.size_x, args.size_y, args.size_z, intrinsics, extrinsics)
+    masked = occlude_frames(frames, ts, track_df, (sx, sy, sz), intrinsics, extrinsics)
 
     if args.dump_mask:
         from PIL import Image
@@ -190,8 +217,7 @@ def main():
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as fh:
         json.dump({
-            "clip_id": args.clip, "target_agent": args.agent,
-            "agent_xy": [args.agent_x, args.agent_y],
+            "clip_id": args.clip, "target_agent": args.agent, "track_id": str(args.track_id),
             "baseline_traces": [t.raw_text for t in base_tr],
             "cf_traces": [t.raw_text for t in cf_tr],
             "baseline_behaviors": [sorted(t.behaviors()) for t in base_tj],
