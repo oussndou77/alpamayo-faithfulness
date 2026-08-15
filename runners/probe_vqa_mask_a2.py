@@ -35,7 +35,29 @@ QUESTIONS = [
 
 
 def ask(model, helper, text_tasks, data, question):
-    ti = text_tasks.prepare_vqa_inputs(data=data, model=model, question=question)
+    import inspect
+    fn = text_tasks.prepare_vqa_inputs
+    sig = inspect.signature(fn)
+    print(f"[vqa] prepare_vqa_inputs signature: {sig}")
+    kw = {}
+    for name, p in sig.parameters.items():
+        lp = name.lower()
+        if "data" in lp:
+            kw[name] = data
+        elif "question" in lp or "prompt" in lp or "text" in lp:
+            kw[name] = question
+        elif "tokenizer" in lp:
+            kw[name] = model.tokenizer
+        elif "config" in lp or "cfg" in lp:
+            kw[name] = model.config
+        elif "model" in lp or "net" in lp or "alpamayo" in lp:
+            kw[name] = model
+        elif p.default is inspect.Parameter.empty:
+            # required param we don't recognize: best guess = the model object
+            print(f"[vqa] unrecognized required param {name!r} -> passing model")
+            kw[name] = model
+    print(f"[vqa] bound params: {list(kw)}")
+    ti = fn(**kw)
     ti = helper.to_device(ti, "cuda")
     with torch.autocast("cuda", dtype=torch.bfloat16):
         res = text_tasks.generate_text(model, ti, top_p=1.0, temperature=0.1,
