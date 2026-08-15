@@ -163,6 +163,8 @@ def main():
     ap.add_argument("--clip", required=True)
     ap.add_argument("--agent", default="vehicle", help="target causal agent type")
     ap.add_argument("--track-id", help="obstacle track_id to occlude (string, e.g. '9')")
+    ap.add_argument("--blackout", action="store_true",
+                    help="replace ALL frames with pure black instead of masking a track: measures how much of the CoC is driven by vision at all vs ego-motion/prior")
     ap.add_argument("--null-control", action="store_true",
                     help="ALSO run a second UNMASKED baseline with different seeds, to measure the\n                          sampling-noise floor: any occlusion effect must exceed this to mean anything")
     ap.add_argument("--control-track-id", default=None,
@@ -189,7 +191,7 @@ def main():
         print("loader order: 0=cross_left 1=front_wide 2=cross_right 3=front_tele")
         return
 
-    if args.track_id is None:
+    if args.track_id is None and not args.blackout:
         raise SystemExit("provide --track-id (the obstacle track to occlude; run run_inference "
                          "to see labeled objects, or list tracks near t0).")
 
@@ -198,21 +200,26 @@ def main():
     extrinsics = avdi.get_clip_feature(args.clip, "sensor_extrinsics", maybe_stream=True)
     obst = avdi.get_clip_feature(args.clip, "obstacle.offline", maybe_stream=True)["obstacle.offline"]
     obst["track_id"] = obst["track_id"].astype(str)      # track_id is a STRING in the labels
-    track_df = obst[obst["track_id"] == str(args.track_id)].sort_values("timestamp_us")
-    if track_df.empty:
-        raise SystemExit(f"track_id {args.track_id!r} not found. Present: "
-                         f"{sorted(obst['track_id'].unique().tolist())}")
-    # cuboid size: median of the track's own labels, unless overridden
-    sx = args.size_x if args.size_x is not None else float(track_df["size_x"].median())
-    sy = args.size_y if args.size_y is not None else float(track_df["size_y"].median())
-    sz = args.size_z if args.size_z is not None else float(track_df["size_z"].median())
-    print(f"target track {args.track_id}: {len(track_df)} obs, cuboid ~{sx:.1f}x{sy:.1f}x{sz:.1f}m")
+    if not args.blackout:
+        track_df = obst[obst["track_id"] == str(args.track_id)].sort_values("timestamp_us")
+        if track_df.empty:
+            raise SystemExit(f"track_id {args.track_id!r} not found. Present: "
+                             f"{sorted(obst['track_id'].unique().tolist())}")
+        sx = args.size_x if args.size_x is not None else float(track_df["size_x"].median())
+        sy = args.size_y if args.size_y is not None else float(track_df["size_y"].median())
+        sz = args.size_z if args.size_z is not None else float(track_df["size_z"].median())
+        print(f"target track {args.track_id}: {len(track_df)} obs, cuboid ~{sx:.1f}x{sy:.1f}x{sz:.1f}m")
 
     data = load_physical_aiavdataset(args.clip, t0_us=args.t0_us)
     frames = data["image_frames"]
     ts = data["absolute_timestamps"].cpu().numpy()
 
-    masked = occlude_frames(frames, ts, track_df, (sx, sy, sz), intrinsics, extrinsics)
+    if args.blackout:
+        masked = frames.clone()
+        masked[:] = frames.min()
+        print("[blackout] ALL cameras, ALL timesteps replaced with pure black")
+    else:
+        masked = occlude_frames(frames, ts, track_df, (sx, sy, sz), intrinsics, extrinsics)
 
     if args.dump_mask:
         from PIL import Image
@@ -239,7 +246,8 @@ def main():
     print("\n" + result.format_report())
 
     payload = {
-        "clip_id": args.clip, "target_agent": args.agent, "track_id": str(args.track_id),
+        "clip_id": args.clip, "target_agent": args.agent,
+        "track_id": str(args.track_id) if args.track_id else "BLACKOUT",
         "baseline_traces": [t.raw_text for t in base_tr],
         "cf_traces": [t.raw_text for t in cf_tr],
         "baseline_behaviors": [sorted(t.behaviors()) for t in base_tj],
