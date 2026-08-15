@@ -170,3 +170,74 @@ def score_control_contrast(clip_id, causal_result, control_result) -> ControlCon
         causal_behavior_change=causal_bc, control_behavior_change=control_bc,
         contrast=contrast, valid_probe=valid,
     )
+
+
+# --- continuous, seed-paired trajectory analysis (fixes categorical-on-curves) ---
+
+# baseline lateral drift beyond this over the horizon = curved road; categorical
+# maneuver labels (nudge_left/right) are unreliable there (v1 "side-in-curve" lesson).
+CURVE_DRIFT_WARN_M = 4.0
+
+
+def _y_at_x(traj, x_target):
+    import numpy as np
+    a = np.asarray(traj, dtype=float)
+    x, y = a[:, 0], a[:, 1]
+    if x_target > float(x.max()):
+        return float("nan")
+    return float(np.interp(x_target, x, y))
+
+
+def continuous_report(payload, object_x, object_y=None):
+    """
+    Seed-paired continuous metrics from a saved counterfactual payload (needs the
+    baseline_xy / cf_xy / control_xy fields written by the A2 runner).
+
+    Reports, per condition: paired ADE vs baseline, lateral position at the occluded
+    object's x, and the paired lateral delta there (sign convention: negative = the
+    counterfactual path moves TOWARD the freed space when the object sat right of the
+    baseline path). Also flags curved-road geometry where categorical labels fail.
+    """
+    import numpy as np
+    base = np.asarray(payload["baseline_xy"], dtype=float)
+    cf = np.asarray(payload["cf_xy"], dtype=float)
+    ctrl = np.asarray(payload.get("control_xy", []), dtype=float)
+    K = base.shape[0]
+
+    drift = float(np.mean([abs(base[k][-1, 1] - base[k][0, 1]) for k in range(K)]))
+    curved = drift >= CURVE_DRIFT_WARN_M
+
+    def paired(a, b):
+        return [float(np.linalg.norm(a[k] - b[k], axis=1).mean()) for k in range(K)]
+
+    yb = [_y_at_x(base[k], object_x) for k in range(K)]
+    yc = [_y_at_x(cf[k], object_x) for k in range(K)]
+    d_cf = float(np.nanmean([c - b for c, b in zip(yc, yb)]))
+    lines = [
+        f"Continuous seed-paired analysis @ object x={object_x:g} m",
+        f"  baseline lateral drift over horizon: {drift:.1f} m"
+        + ("  [CURVED ROAD: categorical maneuver labels unreliable here]" if curved else ""),
+        f"  paired ADE baseline<->CF: {np.mean(paired(base, cf)):.2f} m",
+        f"  lateral delta at object (CF - baseline): {d_cf:+.2f} m",
+    ]
+    d_ctrl = None
+    if ctrl.size:
+        yt = [_y_at_x(ctrl[k], object_x) for k in range(K)]
+        d_ctrl = float(np.nanmean([t - b for t, b in zip(yt, yb)]))
+        lines.append(f"  paired ADE baseline<->control: {np.mean(paired(base, ctrl)):.2f} m")
+        lines.append(f"  lateral delta at object (control - baseline): {d_ctrl:+.2f} m")
+        lines.append(f"  => causal-vs-control lateral contrast: {abs(d_cf) - abs(d_ctrl):+.2f} m")
+    if curved:
+        lines.append("  NOTE: any categorical INCOHERENT/SENSITIVE verdict on this clip should be")
+        lines.append("  read from these continuous numbers, not from maneuver labels.")
+    return "\n".join(lines), {"curved_road": curved, "baseline_drift_m": drift,
+                              "lateral_delta_cf_m": d_cf, "lateral_delta_control_m": d_ctrl}
+
+
+if __name__ == "__main__":  # python -m afh.axes.counterfactual <payload.json> --object-x 26.3
+    import argparse, json as _json
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("payload"); _ap.add_argument("--object-x", type=float, required=True)
+    _a = _ap.parse_args()
+    _rep, _ = continuous_report(_json.load(open(_a.payload)), _a.object_x)
+    print(_rep)

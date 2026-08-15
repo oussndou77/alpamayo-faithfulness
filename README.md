@@ -161,8 +161,8 @@ One clip, five controlled conditions, K=5 seeds each:
 
 <p align="center"><img src="docs/img/cf_trajectories_a2.png" width="85%" alt="baseline vs counterfactual vs control trajectories"/></p>
 
-**Result.** On this clip, Alpamayo 2 Super's reasoning is **causally faithful and
-specific**: removing the object it cites erases it from the explanation (citation
+**Result — language side, on this scene (n=1, K=5).** Alpamayo 2 Super's *reasoning* is
+**causally faithful and specific** here: removing the object it cites erases it from the explanation (citation
 100%→0%), removing an uncited object changes nothing (100%→100%), and the model entirely
 ignores the black mask itself ("road ahead is clear" with a 400-px black box in frame) —
 the mask-as-obstacle confound that affected Alpamayo-R1 does not reproduce here.
@@ -173,8 +173,12 @@ classification artifact: the +11 m lateral drift over 6.4 s is the **road curvin
 so "keep lane" and the observed path agree. At the car's exact position (x≈26.3 m) the
 counterfactual paths shift −0.16 m *toward* the freed space (the right sign for a released
 avoidance margin) vs +0.10 m for the control — suggestive, but below the K=5 sampling
-noise. This parked car barely intruded into the lane; measuring action-side faithfulness
-needs scenes where the cited object forces a large maneuver.
+noise. This parked car barely intruded into the lane; **action-side faithfulness is
+underpowered at K=5** (binomial noise floor 40% — a power analysis puts K≥20-30 per
+condition for Phase G) and needs scenes where the cited object forces a large
+maneuver. The seed-paired continuous analyzer now ships with the harness and flags
+curved-road geometry where categorical labels fail:
+`python -m afh.axes.counterfactual fixtures/cf_0ea6fd88_a2_waypoints.json --object-x 26.3`
 
 ### What the audit itself taught us (rigor notes, kept on purpose)
 
@@ -191,6 +195,13 @@ needs scenes where the cited object forces a large maneuver.
 - **Categorical maneuver labels fail on curved roads** (the v1 "side-in-curve" lesson,
   action-side edition). Faithfulness scoring is moving to seed-paired continuous
   trajectory metrics.
+- **The citation metric is vocabulary-bound.** The parser's agent vocabulary does not
+  include "obstacle"/"obstruction", so part of the R1 citation drop (100%→40%) counts a
+  *renamed* agent as a non-cited one. The car→"obstacle" shift is still a real signal
+  (loss of object identity), but it should be measured as such — two separate metrics
+  (target-citation vs any-agent-reference), with the LLM parser backend as the default
+  when a key is available. The A2 result is unaffected ("road ahead is clear" cites
+  nothing at all).
 - **Blackout as a vision-dependence control:** with zero visual input the model narrates a
   *clear road* rather than uncertainty — the traces do depend on vision (memorization
   ruled out), but absence of signal reads as absence of obstacle.
