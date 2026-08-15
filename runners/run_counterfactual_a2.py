@@ -146,7 +146,7 @@ def run_side(masked_frames, data, helper, model, k_rollouts, seed_offset=0):
     data_masked["image_frames"] = masked_frames
     base_inputs = helper.prepare_model_inputs(data_masked, model.config, model.tokenizer)
 
-    traces, trajs = [], []
+    traces, trajs, xys = [], [], []
     for k in range(k_rollouts):
         seed = k + seed_offset
         torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
@@ -163,9 +163,10 @@ def run_side(masked_frames, data, helper, model, k_rollouts, seed_offset=0):
         traces.append(CoCTrace(clip_id="cf", sample_index=k,
                                raw_text="\n".join(sentences), claims=claims))
         xy = _to_xy(pred_xyz)
+        xys.append(xy.tolist())
         trajs.append(summarize_trajectory([tuple(map(float, p)) for p in xy], dt=0.1))
         print(f"    rollout {k}: {(sentences[0][:70] if sentences else '(empty)')}")
-    return traces, trajs
+    return traces, trajs, xys
 
 
 def main():
@@ -251,9 +252,9 @@ def main():
                                            device_map="cuda:0")
 
     print("=== BASELINE ===")
-    base_tr, base_tj = run_side(frames, data, helper, model, args.k_rollouts)
+    base_tr, base_tj, base_xy = run_side(frames, data, helper, model, args.k_rollouts)
     print("=== COUNTERFACTUAL (causal agent occluded) ===")
-    cf_tr, cf_tj = run_side(masked, data, helper, model, args.k_rollouts)
+    cf_tr, cf_tj, cf_xy = run_side(masked, data, helper, model, args.k_rollouts)
 
     result = score_counterfactual(args.clip, args.agent, base_tr, base_tj, cf_tr, cf_tj)
     print("\n" + result.format_report())
@@ -267,6 +268,7 @@ def main():
         "cf_behaviors": [sorted(t.behaviors()) for t in cf_tj],
         "score": result.score, "verdict": result.verdict,
         "baseline_citation": result.baseline_citation, "cf_citation": result.cf_citation,
+        "baseline_xy": base_xy, "cf_xy": cf_xy,
     }
 
     # optional negative control: occlude a distractor the model does NOT cite
@@ -282,13 +284,14 @@ def main():
               f"cuboid ~{cxs:.1f}x{cys:.1f}x{czs:.1f}m")
         ctrl_masked = occlude_frames(frames, ts, cam_idx_arr, ctrl_df, (cxs, cys, czs), intrinsics, extrinsics)
         print("=== NEGATIVE CONTROL (distractor occluded) ===")
-        ctrl_tr, ctrl_tj = run_side(ctrl_masked, data, helper, model, args.k_rollouts)
+        ctrl_tr, ctrl_tj, ctrl_xy = run_side(ctrl_masked, data, helper, model, args.k_rollouts)
         ctrl_result = score_counterfactual(args.clip, args.agent, base_tr, base_tj, ctrl_tr, ctrl_tj)
         print("\n" + ctrl_result.format_report())
 
         contrast = score_control_contrast(args.clip, result, ctrl_result)
         print("\n" + contrast.format_report())
         payload["control_track_id"] = str(args.control_track_id)
+        payload["control_xy"] = ctrl_xy
         payload["control_cf_traces"] = [t.raw_text for t in ctrl_tr]
         payload["control_behavior_change"] = contrast.control_behavior_change
         payload["causal_behavior_change"] = contrast.causal_behavior_change
@@ -299,8 +302,8 @@ def main():
     # This is the noise floor. Any masked-condition change at or below it is meaningless.
     if args.null_control:
         print("\n=== NULL CONTROL (unmasked, different seeds) ===")
-        null_tr, null_tj = run_side(frames, data, helper, model, args.k_rollouts,
-                                    seed_offset=1000)
+        null_tr, null_tj, null_xy = run_side(frames, data, helper, model, args.k_rollouts,
+                                             seed_offset=1000)
         null_result = score_counterfactual(args.clip, args.agent, base_tr, base_tj,
                                            null_tr, null_tj)
         print("\n" + null_result.format_report())
@@ -314,6 +317,7 @@ def main():
             print(f">>> occlusion exceeds noise floor by "
                   f"{result.behavior_change - floor:+.0%}")
         payload["null_control_behavior_change"] = floor
+        payload["null_xy"] = null_xy
         payload["null_control_traces"] = [t.raw_text for t in null_tr]
         payload["exceeds_noise_floor"] = bool(result.behavior_change > floor)
 
