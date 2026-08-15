@@ -162,6 +162,9 @@ def main():
     ap.add_argument("--clip", required=True)
     ap.add_argument("--agent", default="vehicle", help="target causal agent type")
     ap.add_argument("--track-id", help="obstacle track_id to occlude (string, e.g. '9')")
+    ap.add_argument("--control-track-id", default=None,
+                    help="a DISTRACTOR track the model does NOT cite; runs a negative-control "
+                         "occlusion and reports the causal-vs-control contrast (validates the probe)")
     ap.add_argument("--size-x", type=float, default=None, help="cuboid length override (m)")
     ap.add_argument("--size-y", type=float, default=None, help="cuboid width override (m)")
     ap.add_argument("--size-z", type=float, default=None, help="cuboid height override (m)")
@@ -226,23 +229,51 @@ def main():
 
     print("=== BASELINE ===")
     base_tr, base_tj = run_side(frames, data, helper, model, args.k_rollouts)
-    print("=== COUNTERFACTUAL (agent occluded) ===")
+    print("=== COUNTERFACTUAL (causal agent occluded) ===")
     cf_tr, cf_tj = run_side(masked, data, helper, model, args.k_rollouts)
 
     result = score_counterfactual(args.clip, args.agent, base_tr, base_tj, cf_tr, cf_tj)
     print("\n" + result.format_report())
 
+    payload = {
+        "clip_id": args.clip, "target_agent": args.agent, "track_id": str(args.track_id),
+        "baseline_traces": [t.raw_text for t in base_tr],
+        "cf_traces": [t.raw_text for t in cf_tr],
+        "baseline_behaviors": [sorted(t.behaviors()) for t in base_tj],
+        "cf_behaviors": [sorted(t.behaviors()) for t in cf_tj],
+        "score": result.score, "verdict": result.verdict,
+        "baseline_citation": result.baseline_citation, "cf_citation": result.cf_citation,
+    }
+
+    # optional negative control: occlude a distractor the model does NOT cite
+    if args.control_track_id is not None:
+        from afh.axes.counterfactual import score_control_contrast
+        ctrl_df = obst[obst["track_id"] == str(args.control_track_id)].sort_values("timestamp_us")
+        if ctrl_df.empty:
+            raise SystemExit(f"control track_id {args.control_track_id!r} not found.")
+        cxs = float(ctrl_df["size_x"].median())
+        cys = float(ctrl_df["size_y"].median())
+        czs = float(ctrl_df["size_z"].median())
+        print(f"\ncontrol track {args.control_track_id}: {len(ctrl_df)} obs, "
+              f"cuboid ~{cxs:.1f}x{cys:.1f}x{czs:.1f}m")
+        ctrl_masked = occlude_frames(frames, ts, ctrl_df, (cxs, cys, czs), intrinsics, extrinsics)
+        print("=== NEGATIVE CONTROL (distractor occluded) ===")
+        ctrl_tr, ctrl_tj = run_side(ctrl_masked, data, helper, model, args.k_rollouts)
+        ctrl_result = score_counterfactual(args.clip, args.agent, base_tr, base_tj, ctrl_tr, ctrl_tj)
+        print("\n" + ctrl_result.format_report())
+
+        contrast = score_control_contrast(args.clip, result, ctrl_result)
+        print("\n" + contrast.format_report())
+        payload["control_track_id"] = str(args.control_track_id)
+        payload["control_cf_traces"] = [t.raw_text for t in ctrl_tr]
+        payload["control_behavior_change"] = contrast.control_behavior_change
+        payload["causal_behavior_change"] = contrast.causal_behavior_change
+        payload["contrast"] = contrast.contrast
+        payload["valid_probe"] = contrast.valid_probe
+
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as fh:
-        json.dump({
-            "clip_id": args.clip, "target_agent": args.agent, "track_id": str(args.track_id),
-            "baseline_traces": [t.raw_text for t in base_tr],
-            "cf_traces": [t.raw_text for t in cf_tr],
-            "baseline_behaviors": [sorted(t.behaviors()) for t in base_tj],
-            "cf_behaviors": [sorted(t.behaviors()) for t in cf_tj],
-            "score": result.score, "verdict": result.verdict,
-            "baseline_citation": result.baseline_citation, "cf_citation": result.cf_citation,
-        }, fh, indent=2)
+        json.dump(payload, fh, indent=2)
     print(f"\nSaved -> {args.out}")
 
 

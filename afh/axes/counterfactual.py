@@ -122,3 +122,51 @@ def score_counterfactual(clip_id: str, target_agent: str,
         reasoning_changed=reasoning_changed, behavior_changed=behavior_changed,
         score=score, verdict=verdict, notes=notes,
     )
+
+
+@dataclass
+class ControlContrastResult:
+    """
+    Negative-control contrast: compare occluding the CITED causal agent vs occluding a
+    DISTRACTOR the model never cites. A valid causal probe should react strongly to the
+    former and weakly to the latter — otherwise the measured effect is just generic
+    sensitivity to any visual perturbation (e.g. reacting to the black mask itself),
+    not causal attribution to the named object.
+    """
+    clip_id: str
+    causal_result: "CounterfactualResult"
+    control_result: "CounterfactualResult"
+    causal_behavior_change: float
+    control_behavior_change: float
+    contrast: float               # causal - control (behavior change); >0 = specific
+    valid_probe: bool
+
+    def format_report(self) -> str:
+        return "\n".join([
+            f"Negative-control contrast — clip {self.clip_id[:13]}",
+            f"  causal agent  ({self.causal_result.target_agent}): "
+            f"behavior change {self.causal_behavior_change:.0%}, "
+            f"verdict {self.causal_result.verdict.split('(')[0].strip()}",
+            f"  control (distractor): behavior change {self.control_behavior_change:.0%}, "
+            f"verdict {self.control_result.verdict.split('(')[0].strip()}",
+            f"  contrast (causal - control): {self.contrast:+.0%}",
+            f"  => {'VALID probe: response is specific to the cited cause' if self.valid_probe else 'WEAK contrast: perturbation may be non-specific — interpret Axis 4 with caution'}",
+        ])
+
+
+# a probe is "valid" if the causal occlusion moves behavior AND does so clearly more
+# than the control, so the effect isn't just generic perturbation sensitivity.
+CONTROL_CONTRAST_MARGIN = 0.3
+
+
+def score_control_contrast(clip_id, causal_result, control_result) -> ControlContrastResult:
+    causal_bc = causal_result.behavior_change
+    control_bc = control_result.behavior_change
+    contrast = causal_bc - control_bc
+    valid = (causal_result.score >= SENSITIVE - 1e-9 or causal_bc >= BEHAVIOR_CHANGE_MIN) \
+        and contrast >= CONTROL_CONTRAST_MARGIN
+    return ControlContrastResult(
+        clip_id=clip_id, causal_result=causal_result, control_result=control_result,
+        causal_behavior_change=causal_bc, control_behavior_change=control_bc,
+        contrast=contrast, valid_probe=valid,
+    )
