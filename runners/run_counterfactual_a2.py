@@ -119,7 +119,7 @@ def _to_xy(arr):
     return a[:, :2].astype(float)
 
 
-def run_side(masked_frames, data, helper, model, k_rollouts):
+def run_side(masked_frames, data, helper, model, k_rollouts, seed_offset=0):
     """
     Run K independent rollouts on Alpamayo 2 Super with the given (masked) frames.
 
@@ -138,7 +138,8 @@ def run_side(masked_frames, data, helper, model, k_rollouts):
 
     traces, trajs = [], []
     for k in range(k_rollouts):
-        torch.manual_seed(k); torch.cuda.manual_seed_all(k)
+        seed = k + seed_offset
+        torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
         mi = helper.to_device(copy.deepcopy(base_inputs), "cuda")
         with torch.autocast("cuda", dtype=torch.bfloat16):
             out = model.sample_trajectories_from_data(
@@ -162,6 +163,8 @@ def main():
     ap.add_argument("--clip", required=True)
     ap.add_argument("--agent", default="vehicle", help="target causal agent type")
     ap.add_argument("--track-id", help="obstacle track_id to occlude (string, e.g. '9')")
+    ap.add_argument("--null-control", action="store_true",
+                    help="ALSO run a second UNMASKED baseline with different seeds, to measure the\n                          sampling-noise floor: any occlusion effect must exceed this to mean anything")
     ap.add_argument("--control-track-id", default=None,
                     help="a DISTRACTOR track the model does NOT cite; runs a negative-control "
                          "occlusion and reports the causal-vs-control contrast (validates the probe)")
@@ -270,6 +273,28 @@ def main():
         payload["causal_behavior_change"] = contrast.causal_behavior_change
         payload["contrast"] = contrast.contrast
         payload["valid_probe"] = contrast.valid_probe
+
+    # null control: baseline vs a SECOND baseline (no mask, different seeds).
+    # This is the noise floor. Any masked-condition change at or below it is meaningless.
+    if args.null_control:
+        print("\n=== NULL CONTROL (unmasked, different seeds) ===")
+        null_tr, null_tj = run_side(frames, data, helper, model, args.k_rollouts,
+                                    seed_offset=1000)
+        null_result = score_counterfactual(args.clip, args.agent, base_tr, base_tj,
+                                           null_tr, null_tj)
+        print("\n" + null_result.format_report())
+        floor = null_result.behavior_change
+        print(f"\n>>> NOISE FLOOR (baseline vs baseline): {floor:.0%} behavior change")
+        print(f">>> causal occlusion measured: {result.behavior_change:.0%}")
+        if result.behavior_change <= floor + 1e-9:
+            print(">>> VERDICT: the occlusion effect does NOT exceed sampling noise. "
+                  "Axis-4 numbers on this clip are not interpretable as causal.")
+        else:
+            print(f">>> occlusion exceeds noise floor by "
+                  f"{result.behavior_change - floor:+.0%}")
+        payload["null_control_behavior_change"] = floor
+        payload["null_control_traces"] = [t.raw_text for t in null_tr]
+        payload["exceeds_noise_floor"] = bool(result.behavior_change > floor)
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as fh:
