@@ -38,9 +38,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 
-# loader's fixed camera order (sorted by camera index) -> dataset camera_id
-LOADER_CAMS = ["camera_cross_left_120fov", "camera_front_wide_120fov",
-               "camera_cross_right_120fov", "camera_front_tele_30fov"]
+# FULL camera-index -> camera_id map (loader's name_to_index, verified in v1).
+# The loader may return 4 OR 7 cameras depending on the clip; the tensor order is
+# data["camera_indices"], NEVER a hardcoded list. (A hardcoded 4-cam list caused a
+# mask LEAK on a 7-cam clip: front_tele stayed unmasked while rear_left got a
+# spurious box — caught by visual inspection of all maskcheck PNGs.)
+CAM_INDEX_TO_ID = {
+    0: "camera_cross_left_120fov", 1: "camera_front_wide_120fov",
+    2: "camera_cross_right_120fov", 3: "camera_rear_left_70fov",
+    4: "camera_rear_tele_30fov", 5: "camera_rear_right_70fov",
+    6: "camera_front_tele_30fov",
+}
 
 
 def _interp_track_xyz(track_df, t_us):
@@ -52,7 +60,7 @@ def _interp_track_xyz(track_df, t_us):
     return np.array([x, y, z])
 
 
-def occlude_frames(frames, frame_timestamps, track_df, size_xyz,
+def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
                    intrinsics, extrinsics, pad=1.6):
     """
     Mask the target track by projecting its 3D cuboid into every camera that sees it,
@@ -75,8 +83,10 @@ def occlude_frames(frames, frame_timestamps, track_df, size_xyz,
     hs = np.array(size_xyz) / 2.0
     corner_signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
     masked = []
-    for cam_idx in range(min(out.shape[0], len(LOADER_CAMS))):
-        cam_id = LOADER_CAMS[cam_idx]
+    for cam_idx in range(out.shape[0]):
+        cam_id = CAM_INDEX_TO_ID.get(int(camera_indices[cam_idx]))
+        if cam_id is None:
+            continue
         model = intrinsics.camera_models.get(cam_id)
         pose = extrinsics.sensor_poses.get(cam_id)
         if model is None or pose is None:
@@ -213,13 +223,16 @@ def main():
     data = load_physical_aiavdataset(args.clip, t0_us=args.t0_us)
     frames = data["image_frames"]
     ts = data["absolute_timestamps"].cpu().numpy()
+    cam_idx_arr = data["camera_indices"].cpu().numpy() if hasattr(data["camera_indices"], "cpu") else np.asarray(data["camera_indices"])
+    print(f"[cams] tensor order = {cam_idx_arr.tolist()} -> "
+          f"{[CAM_INDEX_TO_ID.get(int(i),'?').split('_',1)[1] for i in cam_idx_arr]}")
 
     if args.blackout:
         masked = frames.clone()
         masked[:] = frames.min()
         print("[blackout] ALL cameras, ALL timesteps replaced with pure black")
     else:
-        masked = occlude_frames(frames, ts, track_df, (sx, sy, sz), intrinsics, extrinsics)
+        masked = occlude_frames(frames, ts, cam_idx_arr, track_df, (sx, sy, sz), intrinsics, extrinsics)
 
     if args.dump_mask:
         from PIL import Image
@@ -267,7 +280,7 @@ def main():
         czs = float(ctrl_df["size_z"].median())
         print(f"\ncontrol track {args.control_track_id}: {len(ctrl_df)} obs, "
               f"cuboid ~{cxs:.1f}x{cys:.1f}x{czs:.1f}m")
-        ctrl_masked = occlude_frames(frames, ts, ctrl_df, (cxs, cys, czs), intrinsics, extrinsics)
+        ctrl_masked = occlude_frames(frames, ts, cam_idx_arr, ctrl_df, (cxs, cys, czs), intrinsics, extrinsics)
         print("=== NEGATIVE CONTROL (distractor occluded) ===")
         ctrl_tr, ctrl_tj = run_side(ctrl_masked, data, helper, model, args.k_rollouts)
         ctrl_result = score_counterfactual(args.clip, args.agent, base_tr, base_tj, ctrl_tr, ctrl_tj)

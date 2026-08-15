@@ -91,7 +91,8 @@ def main():
 
     data = load_physical_aiavdataset(args.clip, t0_us=args.t0_us)
     ts = data["absolute_timestamps"].cpu().numpy()
-    masked_frames = occlude_frames(data["image_frames"], ts, tr, size, intr, extr)
+    ci = data["camera_indices"].cpu().numpy() if hasattr(data["camera_indices"], "cpu") else data["camera_indices"]
+    masked_frames = occlude_frames(data["image_frames"], ts, ci, tr, size, intr, extr)
     data_masked = dict(data)
     data_masked["image_frames"] = masked_frames
 
