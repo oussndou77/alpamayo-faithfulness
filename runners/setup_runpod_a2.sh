@@ -32,6 +32,9 @@ uv sync --locked --dev
 # shellcheck disable=SC1091
 source "${UV_PROJECT_ENVIRONMENT}/bin/activate"
 
+# 2b) hf_transfer accelerates the ~68 GB weights download (HF_HUB_ENABLE_HF_TRANSFER=1)
+uv pip install hf_transfer
+
 # 3) HF auth — the model is gated; access must be APPROVED on
 #    https://huggingface.co/nvidia/Alpamayo2-Super before the download will work.
 #    Export HF_TOKEN before running this script, or run `hf auth login` interactively.

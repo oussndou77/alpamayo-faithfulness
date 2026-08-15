@@ -127,25 +127,17 @@ def main():
     if not args.skip_vqa:
         stage("5/5 one VQA call (grounding format discovery)")
         try:
-            question = ("Which specific objects in the scene most influence the ego "
-                        "vehicle's next maneuver? Point them out.")
-            if hasattr(text_tasks, "prepare_vqa_inputs"):
-                task_inputs = text_tasks.prepare_vqa_inputs(
-                    data=data, model_config=model.config, tokenizer=model.tokenizer,
-                    question=question)
-                print("used prepare_vqa_inputs")
-            else:
-                task_inputs = text_tasks.prepare_text_generation_inputs(
-                    data=data, model_config=model.config, tokenizer=model.tokenizer,
-                    task="vqa")
-                print("fallback: prepare_text_generation_inputs(task='vqa')")
+            # real signature (verified on the pod): (data, model, question, **kwargs)
+            question = getattr(text_tasks, "DEFAULT_GROUNDING_QUESTION",
+                               "Point out the objects that most influence the ego's next maneuver.")
+            task_inputs = text_tasks.prepare_vqa_inputs(data=data, model=model, question=question)
             task_inputs = helper.to_device(task_inputs, "cuda")
             torch.cuda.reset_peak_memory_stats()
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 result = text_tasks.generate_text(
                     model, task_inputs, top_p=1.0, temperature=0.1, max_new_tokens=1024)
             describe(result, "vqa result", max_depth=3)
-            for key in ("answer", "grounding", "boxes", "bboxes", "cot"):
+            for key in ("answer", "grounding", "boxes", "bboxes", "cot", "reasoning"):
                 if isinstance(result, dict) and key in result:
                     print(f"\n>>> result[{key!r}]:")
                     describe(result[key], key, max_depth=4)
