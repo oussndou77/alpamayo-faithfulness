@@ -140,6 +140,7 @@ class ControlContrastResult:
     control_behavior_change: float
     contrast: float               # causal - control (behavior change); >0 = specific
     valid_probe: bool
+    citation_contrast: float = 0.0  # (causal citation drop) - (control citation drop); low-noise
 
     def format_report(self) -> str:
         return "\n".join([
@@ -149,7 +150,8 @@ class ControlContrastResult:
             f"verdict {self.causal_result.verdict.split('(')[0].strip()}",
             f"  control (distractor): behavior change {self.control_behavior_change:.0%}, "
             f"verdict {self.control_result.verdict.split('(')[0].strip()}",
-            f"  contrast (causal - control): {self.contrast:+.0%}",
+            f"  behavior contrast (causal - control): {self.contrast:+.0%}",
+            f"  citation contrast (causal - control): {self.citation_contrast:+.0%}   <- low-noise signal",
             f"  => {'VALID probe: response is specific to the cited cause' if self.valid_probe else 'WEAK contrast: perturbation may be non-specific — interpret Axis 4 with caution'}",
         ])
 
@@ -163,12 +165,18 @@ def score_control_contrast(clip_id, causal_result, control_result) -> ControlCon
     causal_bc = causal_result.behavior_change
     control_bc = control_result.behavior_change
     contrast = causal_bc - control_bc
-    valid = (causal_result.score >= SENSITIVE - 1e-9 or causal_bc >= BEHAVIOR_CHANGE_MIN) \
-        and contrast >= CONTROL_CONTRAST_MARGIN
+    # citation contrast is the low-noise signal (review fix): how much the causal
+    # occlusion erases the cited agent from the narrative, vs the control occlusion.
+    causal_cit_drop = causal_result.baseline_citation - causal_result.cf_citation
+    control_cit_drop = control_result.baseline_citation - control_result.cf_citation
+    citation_contrast = causal_cit_drop - control_cit_drop
+    valid = citation_contrast >= CONTROL_CONTRAST_MARGIN or (
+        (causal_result.score >= SENSITIVE - 1e-9 or causal_bc >= BEHAVIOR_CHANGE_MIN)
+        and contrast >= CONTROL_CONTRAST_MARGIN)
     return ControlContrastResult(
         clip_id=clip_id, causal_result=causal_result, control_result=control_result,
         causal_behavior_change=causal_bc, control_behavior_change=control_bc,
-        contrast=contrast, valid_probe=valid,
+        contrast=contrast, valid_probe=valid, citation_contrast=citation_contrast,
     )
 
 
