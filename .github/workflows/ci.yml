@@ -1,0 +1,12 @@
+name: cold-harness-tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - run: pip install numpy pandas
+      - run: python tests/test_end_to_end_cold.py
+      - run: python -m afh.axes.counterfactual fixtures/cf_0ea6fd88_a2_waypoints.json --object-x 26.3
