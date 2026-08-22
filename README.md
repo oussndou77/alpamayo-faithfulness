@@ -1,3 +1,4 @@
+![CI](https://github.com/oussndou77/alpamayo-faithfulness/actions/workflows/ci.yml/badge.svg)
 # Alpamayo-Faithfulness
 
 **A faithfulness evaluation harness for the reasoning traces of NVIDIA Alpamayo** — the open reasoning Vision-Language-Action (VLA) models for autonomous driving.
