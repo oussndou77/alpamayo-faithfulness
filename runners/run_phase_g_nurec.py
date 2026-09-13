@@ -74,8 +74,11 @@ with open(args.out, "a", newline="") as fh2:
                 ts = tdf["timestamp_us"].to_numpy(dtype=float)
                 if args.t0_us < ts.min() or args.t0_us > ts.max():
                     continue
-                x = float(np.interp(args.t0_us, ts, tdf["x"].to_numpy(dtype=float)))
-                y = float(np.interp(args.t0_us, ts, tdf["y"].to_numpy(dtype=float)))
+                # NuRec uses center_x/center_y; Alpamayo parquet uses x/y
+                xcol = "center_x" if "center_x" in tdf.columns else "x"
+                ycol = "center_y" if "center_y" in tdf.columns else "y"
+                x = float(np.interp(args.t0_us, ts, tdf[xcol].to_numpy(dtype=float)))
+                y = float(np.interp(args.t0_us, ts, tdf[ycol].to_numpy(dtype=float)))
                 if not (sg.X_MIN < x < sg.X_MAX and abs(y) < sg.LANE_HALF_WIDTH_M):
                     continue
                 n_inpath += 1
