@@ -252,6 +252,38 @@ docs/
 
 The design separates **GPU work** (running Alpamayo, in `runners/`) from **CPU work** (parsing + scoring, in `afh/`). Roughly 80% of the harness — the parser and axes 1–3 — is built and tested cold against fixtures, with no GPU, then exercised on real model output in a focused pod session.
 
+## Where this sits
+
+Two industry sources published in August 2026 frame why this problem matters, and what
+kind of tool is missing.
+
+**Waymo — [10 AI Lessons from 200+ Million Fully Autonomous Miles](https://waymo.com/blog/2026/08/10ailessons)** (Aug 26, 2026). Three of the ten lessons are
+directly about the gap this harness addresses:
+
+- *Lesson 4 — "You can't build trust with a black box."* Pure end-to-end architectures
+  risk black-box failures, so Waymo runs an **independent onboard validation layer** that
+  checks every proposed trajectory — a choice they call "non-negotiable for safely scaling
+  at L4."
+- *Lesson 6 — "Every great driver needs a great Critic."* They built an automated AI critic
+  precisely because, without one, "the Driver risks **grading its own homework**." A model
+  that emits its own explanations and is never checked against intervention is doing
+  exactly that.
+- *Lesson 7 — VLMs improve scene reasoning but are "too slow for real-time control and lack
+  sufficient spatial awareness on their own."* This is the same split Alpamayo 2 Super
+  implements: a reasoning VLM whose hidden states condition a fast diffusion action expert
+  — which is why reasoning and action can, in principle, come apart, and why Axis 4
+  measures them separately.
+
+**NVIDIA — [Scale AV Perception with Omniverse NuRec](https://developer.nvidia.com/blog/scale-av-perception-across-vehicle-platforms-with-nvidia-omniverse-nurec/)** (Aug 31, 2026) makes the Phase-H intervention concrete
+(see the roadmap below).
+
+On the research side, this work sits in the intervention-based faithfulness line: Jacovi &
+Goldberg for the definition (an explanation is faithful if it reflects the actual reasoning
+process, testable only by intervention, not by plausibility), and Turpin et al. / Lanham et
+al. for perturbation tests of chain-of-thought in LLMs. The contribution here is porting
+that methodology to a **driving VLA on real sensor data**, where the "explanation" is a
+safety artifact rather than a research curiosity.
+
 ## Roadmap
 
 - [x] **Phase A** — Alpamayo-R1-10B inference on a GPU pod; real CoC traces + trajectories on PhysicalAI-AV.
@@ -260,8 +292,25 @@ The design separates **GPU work** (running Alpamayo, in `runners/`) from **CPU w
 - [x] **Phase D** — Per-clip and dataset-level faithfulness scorecard.
 - [x] **Phase E** — Counterfactual axis (axis 4), v1 via occlusion.
 - [x] **Phase F** — Alpamayo 2 Super port + controlled causal audit (negative control, null control, blackout, continuous paired trajectory analysis) one week after model release.
-- [ ] **Phase G** — Scale to clips where the cited agent forces a large maneuver (action-side faithfulness above the noise floor); seed-paired continuous scoring in the harness; citation-based contrast metric.
-- [ ] **Phase H** — Beyond pixels: photometric counterfactuals (NuRec/Cosmos) and activation-level interventions (causal tracing on the VLM hidden states that condition the diffusion action expert).
+- [ ] **Phase G — scale where the effect is measurable.** `runners/select_clips_g.py` ranks
+  clips by expected maneuver impact (cited agent ahead, in-path, large) so occlusion moves
+  the trajectory above the 40% categorical noise floor. Then K≥20 per condition on the top
+  candidates, seed-paired continuous scoring, bootstrap intervals — turning the case study
+  into a faithfulness benchmark.
+- [ ] **Phase H — beyond pixels.** Two interventions that avoid the mask artifact entirely:
+  - **Photometric counterfactuals via NuRec.** The [Physical AI NuRec dataset](https://huggingface.co/datasets/nvidia/PhysicalAI-Autonomous-Vehicles-NuRec) ships 1,500+
+    neural-reconstructed driving scenes (3D Gaussian splatting, ~20 s each) rendered from
+    the *same six cameras* Alpamayo consumes — front-wide 120°, front-tele 30°, cross-left/
+    right 120°, rear-left/right 70°. Crucially, each reconstruction retains rig
+    trajectories, per-camera calibration **and dynamic object tracks**, so an agent can be
+    removed from the 3D scene and the view re-rendered — a genuine counterfactual with no
+    black box in frame, refined with [Harmonizer](https://github.com/NVIDIA/harmonizer) to suppress rendering artifacts. Same
+    underlying dataset as the audits above, so occlusion and photometric removal can be
+    compared *on the same scene against the same baseline* — the control that settles
+    whether pixel occlusion is a valid intervention at all.
+  - **Activation-level interventions.** Causal tracing / activation patching on the VLM
+    hidden states that condition the diffusion action expert — the architectural bottleneck
+    between "what the model says" and "what the car does".
 
 ## License & data
 
