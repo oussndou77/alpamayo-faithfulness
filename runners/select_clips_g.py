@@ -10,13 +10,32 @@ barely intruded; we need hard blockers / crossing agents).
 
 CPU-only (streams obstacle labels, no model). Run on a cheap pod or any machine
 with dataset access:
-    python runners/select_clips_g.py --clip-index /workspace/alpamayo2/notebooks/clip_ids.parquet \
-        --t0-us 5100000 --max-clips 200 --out outputs/phase_g_candidates.csv
+
+    # Mode 1: run on all clips from the Alpamayo parquet index
+    python runners/select_clips_g.py \
+        --clip-index /workspace/alpamayo2/notebooks/clip_ids.parquet \
+        --max-clips 200 --out outputs/phase_g_candidates.csv
+
+    # Mode 2: restrict to NuRec clips (enables photometric counterfactuals in Phase H)
+    # First dump NuRec UUIDs: python runners/list_nurec_clips.py --out nurec_clips.txt
+    python runners/select_clips_g.py \
+        --clip-index /workspace/alpamayo2/notebooks/clip_ids.parquet \
+        --nurec-list outputs/nurec_clips.txt \
+        --out outputs/phase_g_nurec_candidates.csv
+
+    # Mode 3: pass clip UUIDs directly (no parquet)
+    python runners/select_clips_g.py \
+        --clip-ids 0ea6fd88-... 06b483cf-... \
+        --out outputs/custom_candidates.csv
 
 Scoring per clip: for each labeled track near t0, interpolate its position at t0;
 keep objects AHEAD (5 < x < 35 m) and IN-PATH (|y| < lane half-width). Score
 favors close, centered, large objects. Resumable: appends to --out, skips clips
 already scored.
+
+NuRec advantage: clips in the NuRec subset can be audited with BOTH occlusion (black
+box, fast) AND photometric counterfactuals (real 3D removal via Cosmos/Harmonizer) —
+the comparison that settles whether pixel occlusion is a valid intervention.
 """
 
 import argparse
@@ -36,17 +55,42 @@ def score_track(x, y, sx, sy):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--clip-index", required=True)
+    ap.add_argument("--clip-index", default=None,
+                    help="parquet with a clip_id column (Alpamayo notebook format)")
+    ap.add_argument("--clip-ids", nargs="+", default=None,
+                    help="explicit list of clip UUIDs (no parquet needed)")
+    ap.add_argument("--nurec-list", default=None,
+                    help="text file with one NuRec UUID per line; filters clip-index to "
+                         "this subset and adds a nurec=True column to the output")
     ap.add_argument("--t0-us", type=int, default=5_100_000)
     ap.add_argument("--max-clips", type=int, default=200)
     ap.add_argument("--out", default="outputs/phase_g_candidates.csv")
     args = ap.parse_args()
+    if not args.clip_index and not args.clip_ids:
+        ap.error("provide --clip-index or --clip-ids")
 
     import numpy as np
     import pandas as pd
     import physical_ai_av
 
-    clip_ids = pd.read_parquet(args.clip_index)["clip_id"].tolist()[: args.max_clips]
+    # construire la liste de clips à scorer
+    if args.clip_ids:
+        clip_ids = list(args.clip_ids)
+    else:
+        df_idx = pd.read_parquet(args.clip_index)
+        col = "clip_id" if "clip_id" in df_idx.columns else df_idx.columns[0]
+        clip_ids = df_idx[col].tolist()
+
+    # filtrer sur le sous-ensemble NuRec si fourni
+    nurec_set = set()
+    if args.nurec_list:
+        with open(args.nurec_list) as fh:
+            nurec_set = {line.strip() for line in fh if line.strip()}
+        clip_ids = [c for c in clip_ids if c in nurec_set]
+        print(f"[nurec] {len(nurec_set)} scènes dans le fichier, "
+              f"{len(clip_ids)} recoupements avec le parquet index")
+
+    clip_ids = clip_ids[: args.max_clips]
     done = set()
     if os.path.exists(args.out):
         done = set(pd.read_csv(args.out)["clip_id"].tolist())
@@ -58,7 +102,7 @@ def main():
     with open(args.out, "a", newline="") as fh:
         w = csv.writer(fh)
         if new_file:
-            w.writerow(["clip_id", "best_track_id", "score", "x_m", "y_m",
+            w.writerow(["clip_id", "nurec", "best_track_id", "score", "x_m", "y_m",
                         "size_x", "size_y", "n_inpath"])
         for i, cid in enumerate(clip_ids):
             if cid in done:
@@ -84,12 +128,14 @@ def main():
                         best, best_row = sc, (tid, sc, x, y, sx, sy)
                 if best_row:
                     tid, sc, x, y, sx, sy = best_row
-                    w.writerow([cid, tid, f"{sc:.3f}", f"{x:.1f}", f"{y:.2f}",
+                    in_nurec = "yes" if cid in nurec_set else ""
+                    w.writerow([cid, in_nurec, tid, f"{sc:.3f}", f"{x:.1f}", f"{y:.2f}",
                                 f"{sx:.1f}", f"{sy:.1f}", n_inpath])
                     fh.flush()
                     print(f"[{i}] {cid[:8]} score={sc:.2f} track={tid} x={x:.1f} y={y:+.2f}")
                 else:
-                    w.writerow([cid, "", "0", "", "", "", "", 0]); fh.flush()
+                    in_nurec = "yes" if cid in nurec_set else ""
+                w.writerow([cid, in_nurec, "", "0", "", "", "", "", 0]); fh.flush()
             except Exception as e:
                 print(f"[{i}] {cid[:8]} skip: {e}")
 
