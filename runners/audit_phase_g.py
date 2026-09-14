@@ -61,6 +61,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--t0-file", required=True, help="JSON from find_t0.py")
     ap.add_argument("--k-rollouts", type=int, default=20)
+    ap.add_argument("--top", type=int, default=None,
+                    help="audit only the top-N clips by blocking score (start small: --top 3)")
     ap.add_argument("--agent", default="vehicle")
     ap.add_argument("--dump-mask", action="store_true",
                     help="only render maskcheck PNGs for every clip and exit (verify first!)")
@@ -81,6 +83,9 @@ def main():
 
     t0map = json.load(open(args.t0_file))
     clips = [(c, v) for c, v in t0map.items() if v.get("t0_us")]
+    clips.sort(key=lambda cv: cv[1].get("score", 0), reverse=True)
+    if args.top:
+        clips = clips[: args.top]
     print(f"[audit] {len(clips)} clips with a valid t0")
 
     avdi = physical_ai_av.PhysicalAIAVDatasetInterface()
