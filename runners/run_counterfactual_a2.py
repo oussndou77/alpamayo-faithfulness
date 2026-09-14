@@ -61,7 +61,7 @@ def _interp_track_xyz(track_df, t_us):
 
 
 def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
-                   intrinsics, extrinsics, pad=1.6):
+                   intrinsics, extrinsics, pad=1.15, max_area_frac=0.35):
     """
     Mask the target track by projecting its 3D cuboid into every camera that sees it,
     at the ACTUAL timestamp of each camera frame.
@@ -71,6 +71,13 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
         cross_left[-1]=5.094s), and the last frame is not exactly t0 — so a fixed t0
         position mis-projects. We interpolate the track to each camera's own timestamp.
       * obstacle-label track_id is a STRING; the caller must filter with str ids.
+
+    Near objects (7-10 m, in-path) project large in the WIDE camera; a 1.6x pad there
+    swallowed 85% of the frame, destroying the context the audit needs to attribute the
+    effect to the cited object. So: pad is modest (1.15), and max_area_frac caps the mask
+    at a fraction of each camera's area — beyond that the box is centered-and-clamped to
+    the cap and a warning is printed (that clip is a better fit for a photometric NuRec
+    counterfactual than for pixel occlusion).
 
     frames: (n_cam, n_t, C, H, W). frame_timestamps: (n_cam, n_t) absolute us.
     track_df: this track's obstacle rows (already filtered), sorted by timestamp.
@@ -82,7 +89,8 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
     dark = out.min()
     hs = np.array(size_xyz) / 2.0
     corner_signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
-    masked = []
+    area_cap = max_area_frac * H * W
+    masked, capped = [], []
     for cam_idx in range(out.shape[0]):
         cam_id = CAM_INDEX_TO_ID.get(int(camera_indices[cam_idx]))
         if cam_id is None:
@@ -105,6 +113,11 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
             x0, y0, x1, y1 = px[:, 0].min(), px[:, 1].min(), px[:, 0].max(), px[:, 1].max()
             cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
             bw, bh = (x1 - x0) * pad, (y1 - y0) * pad
+            # cap the masked area per camera so a near object doesn't swallow the scene
+            if bw * bh > area_cap:
+                scale = (area_cap / (bw * bh)) ** 0.5
+                bw, bh = bw * scale, bh * scale
+                capped.append(cam_idx)
             lo_x, hi_x = int(max(0, cx - bw / 2)), int(min(W, cx + bw / 2))
             lo_y, hi_y = int(max(0, cy - bh / 2)), int(min(H, cy + bh / 2))
             if lo_x < hi_x and lo_y < hi_y:
@@ -116,6 +129,10 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
         print(f"[occlude] projected & masked: {', '.join(masked)}")
     else:
         print("[occlude] WARNING agent not visible in any camera/timestep")
+    if capped:
+        cams = sorted(set(capped))
+        print(f"[occlude] NOTE mask hit the {max_area_frac:.0%} area cap on cam(s) {cams} "
+              f"(near object) — prefer a photometric NuRec counterfactual for a clean removal here")
     return out
 
 
