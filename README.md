@@ -203,9 +203,18 @@ curved-road geometry where categorical labels fail:
   (target-citation vs any-agent-reference), with the LLM parser backend as the default
   when a key is available. The A2 result is unaffected ("road ahead is clear" cites
   nothing at all).
-- **Blackout as a vision-dependence control:** with zero visual input the model narrates a
-  *clear road* rather than uncertainty — the traces do depend on vision (memorization
-  ruled out), but absence of signal reads as absence of obstacle.
+- **Blackout as a vision-dependence control — confirmed by NVIDIA as intended design.**
+  With zero visual input the model narrates a *clear road* rather than uncertainty: the
+  traces do depend on vision (memorization ruled out), but absence of signal reads as
+  absence of obstacle. Raised as [NVlabs/alpamayo2#9](https://github.com/NVlabs/alpamayo2/issues/9); the team's answer settles the
+  design question: the model has no mechanism to detect or flag degraded/absent visual
+  input, so signal-absence and obstacle-absence are not distinguished at the model level.
+  Sensor-health handling is a downstream responsibility — the CoC trace assumes valid
+  camera input and should be gated on an upstream sensor-health check before it is
+  consumed. There is currently no inference-time flag or prompt to elicit a
+  low-confidence response. This is not a defect; it is a documented boundary of the
+  training distribution, and it is the gap the uncertainty fine-tuning track below
+  (`afh/degradation.py`, `afh/uncertainty_dataset.py`) is built to close.
 
 Fixtures: `fixtures/cf_0ea6fd88_a2_waypoints.json` (full paired experiment),
 `fixtures/cf_0ea6fd88_a2_blackout.json`, `fixtures/records_a2.json`.
@@ -251,6 +260,27 @@ docs/
 ```
 
 The design separates **GPU work** (running Alpamayo, in `runners/`) from **CPU work** (parsing + scoring, in `afh/`). Roughly 80% of the harness — the parser and axes 1–3 — is built and tested cold against fixtures, with no GPU, then exercised on real model output in a focused pod session.
+
+## Uncertainty fine-tuning track (closing the gap NVIDIA confirmed)
+
+Since there is no inference-time way to make A2 Super express low confidence under
+degraded input, this track builds the training signal to add it. Data pipeline is
+complete and runs cold; training is the next step.
+
+- **`afh/degradation.py`** — seven parametric sensor degradations, each with a continuous
+  severity `s ∈ [0, 1]` and deterministic by seed: camera blackout, glare, lens occlusion,
+  blur, low-light noise, frozen frames, cross-camera desync. Plus the **target policy**:
+  a graded uncertainty statement (*"two forward cameras are obstructed; I cannot confirm
+  the road ahead is clear"*) and a conservatively damped trajectory. The damping constants
+  are a stated policy, not ground truth.
+- **`afh/uncertainty_dataset.py`** — the "dataset" is a JSONL manifest of a few hundred
+  bytes per example (clip, spec, targets); frames are re-loaded and re-degraded at
+  training time, so nothing heavy is stored and every example is reproducible. ~40% clean
+  examples keep the model calibrated rather than permanently anxious.
+  `python -m afh.uncertainty_dataset build --records fixtures/records_a2.json --diag fixtures/raw_diag_a2.json`
+- **Evaluation** reuses the causal harness: uncertainty must correlate with severity
+  (`uncertainty_score`), faithfulness on clean input must not regress (Axes 1–4), and the
+  behavior must generalize to degradation families held out from training.
 
 ## Where this sits
 
