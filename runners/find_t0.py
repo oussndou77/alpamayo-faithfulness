@@ -26,11 +26,17 @@ import os
 X_MIN, X_MAX = 5.0, 35.0
 LANE_HALF_WIDTH_M = 1.8
 
+# Pixel occlusion is only valid while the object stays a modest fraction of every camera.
+# Below ~12 m an in-path vehicle fills most of the 30-deg tele frame: masking it either
+# swallows the scene or (if capped) leaves its roof visible. Those clips belong to the
+# photometric NuRec track. Above ~25 m the object stops forcing a real maneuver.
+MASKABLE_X_MIN, MASKABLE_X_MAX = 12.0, 25.0
 
-def blocking_score(x, y, sx, sy):
-    if not (X_MIN < x < X_MAX and abs(y) < LANE_HALF_WIDTH_M):
+
+def blocking_score(x, y, sx, sy, x_min=X_MIN, x_max=X_MAX):
+    if not (x_min < x < x_max and abs(y) < LANE_HALF_WIDTH_M):
         return 0.0
-    closeness = max(0.0, 1.0 - (x - X_MIN) / (X_MAX - X_MIN))
+    closeness = max(0.0, 1.0 - (x - x_min) / (x_max - x_min))
     centered = max(0.0, 1.0 - abs(y) / LANE_HALF_WIDTH_M)
     size = min(1.0, (sx * sy) / 8.0)
     return 0.45 * centered + 0.35 * closeness + 0.20 * size
@@ -78,6 +84,11 @@ def main():
     ap.add_argument("--t0-min", type=int, default=2_000_000)
     ap.add_argument("--t0-max", type=int, default=8_000_000)
     ap.add_argument("--step", type=int, default=200_000, help="t0 grid step (us)")
+    ap.add_argument("--maskable", action="store_true",
+                    help=f"restrict to objects in [{MASKABLE_X_MIN}, {MASKABLE_X_MAX}] m — the range "
+                         "where pixel occlusion covers the object cleanly on every camera")
+    ap.add_argument("--x-min", type=float, default=None)
+    ap.add_argument("--x-max", type=float, default=None)
     ap.add_argument("--out", default="outputs/phase_g_t0.json")
     args = ap.parse_args()
 
@@ -92,6 +103,9 @@ def main():
     else:
         ap.error("provide --clips or --from-csv")
 
+    x_min = args.x_min if args.x_min is not None else (MASKABLE_X_MIN if args.maskable else X_MIN)
+    x_max = args.x_max if args.x_max is not None else (MASKABLE_X_MAX if args.maskable else X_MAX)
+    print(f"[range] target object distance window: {x_min}-{x_max} m")
     avdi = physical_ai_av.PhysicalAIAVDatasetInterface()
     grid = list(range(args.t0_min, args.t0_max + 1, args.step))
     results = {}
@@ -114,7 +128,7 @@ def main():
                         continue
                     x = float(np.interp(t0, ts, tdf[xcol].to_numpy(float)))
                     y = float(np.interp(t0, ts, tdf[ycol].to_numpy(float)))
-                    sc = blocking_score(x, y, sx, sy)
+                    sc = blocking_score(x, y, sx, sy, x_min, x_max)
                     if sc > best["score"]:
                         best = {"score": round(sc, 3), "t0_us": int(t0),
                                 "track_id": tid, "x": round(x, 1), "y": round(y, 2),

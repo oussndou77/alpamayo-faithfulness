@@ -61,7 +61,7 @@ def _interp_track_xyz(track_df, t_us):
 
 
 def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
-                   intrinsics, extrinsics, pad=1.15, max_area_frac=0.35):
+                   intrinsics, extrinsics, pad=1.15, max_area_frac=None):
     """
     Mask the target track by projecting its 3D cuboid into every camera that sees it,
     at the ACTUAL timestamp of each camera frame.
@@ -72,12 +72,16 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
         position mis-projects. We interpolate the track to each camera's own timestamp.
       * obstacle-label track_id is a STRING; the caller must filter with str ids.
 
-    Near objects (7-10 m, in-path) project large in the WIDE camera; a 1.6x pad there
-    swallowed 85% of the frame, destroying the context the audit needs to attribute the
-    effect to the cited object. So: pad is modest (1.15), and max_area_frac caps the mask
-    at a fraction of each camera's area — beyond that the box is centered-and-clamped to
-    the cap and a warning is printed (that clip is a better fit for a photometric NuRec
-    counterfactual than for pixel occlusion).
+    Mask sizing, learned from two rounds of visual inspection:
+      * pad=1.6 on a NEAR object (7-10 m) swallowed 85% of the wide frame — no context left
+        to attribute the effect to the cited object. pad=1.15 fixes that.
+      * capping the mask area instead TRUNCATES it: the box then covers only the lower part
+        of a large nearby object and its roof stays visible — a leak. There is no good cap
+        for an object that legitimately fills most of a tele frame.
+    Conclusion (a methodological finding, not a bug): pixel occlusion is only a valid
+    intervention while the object stays a modest fraction of every camera. For nearer
+    objects use a photometric NuRec counterfactual instead. max_area_frac is therefore
+    OFF by default; set it only to DIAGNOSE which clips are too close for pixel occlusion.
 
     frames: (n_cam, n_t, C, H, W). frame_timestamps: (n_cam, n_t) absolute us.
     track_df: this track's obstacle rows (already filtered), sorted by timestamp.
@@ -89,7 +93,7 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
     dark = out.min()
     hs = np.array(size_xyz) / 2.0
     corner_signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
-    area_cap = max_area_frac * H * W
+    area_cap = (max_area_frac * H * W) if max_area_frac else None
     masked, capped = [], []
     for cam_idx in range(out.shape[0]):
         cam_id = CAM_INDEX_TO_ID.get(int(camera_indices[cam_idx]))
@@ -114,7 +118,7 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
             cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
             bw, bh = (x1 - x0) * pad, (y1 - y0) * pad
             # cap the masked area per camera so a near object doesn't swallow the scene
-            if bw * bh > area_cap:
+            if area_cap is not None and bw * bh > area_cap:
                 scale = (area_cap / (bw * bh)) ** 0.5
                 bw, bh = bw * scale, bh * scale
                 capped.append(cam_idx)
@@ -131,8 +135,8 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
         print("[occlude] WARNING agent not visible in any camera/timestep")
     if capped:
         cams = sorted(set(capped))
-        print(f"[occlude] NOTE mask hit the {max_area_frac:.0%} area cap on cam(s) {cams} "
-              f"(near object) — prefer a photometric NuRec counterfactual for a clean removal here")
+        print(f"[occlude] NOTE mask exceeded {max_area_frac:.0%} of cam(s) {cams} before capping "
+              f"(object too near) — this clip belongs to the photometric NuRec track, not pixel occlusion")
     return out
 
 
