@@ -59,18 +59,31 @@ def blocking_score(x, y, sx, sy, x_min=X_MIN, x_max=X_MAX):
     return 0.45 * centered + 0.35 * closeness + 0.20 * size
 
 
-def _ego_speed(avdi, cid, t0_us):
-    """Ego speed (m/s) at t0 from the ego-motion feature; None if unavailable."""
+def _ego_speed(avdi, cid, t0_us, window_us=500_000):
+    """
+    Ego speed (m/s) at t0 from the `egomotion.offline` feature.
+
+    Columns are timestamp / qx qy qz qw / x y z — note the timestamp column is
+    `timestamp` (not `timestamp_us` like the obstacle labels), and its unit is detected
+    from the magnitude so the same code works whether it is us, ms or s.
+    Returns None if the feature or the window is unavailable.
+    """
     import numpy as np
     try:
-        ego = avdi.get_clip_feature(cid, "egomotion", maybe_stream=True)
-        df = list(ego.values())[0] if isinstance(ego, dict) else ego
-        ts = df["timestamp_us"].to_numpy(float)
-        xc = "x" if "x" in df.columns else "center_x"
-        yc = "y" if "y" in df.columns else "center_y"
-        x = np.interp([t0_us - 250_000, t0_us + 250_000], ts, df[xc].to_numpy(float))
-        y = np.interp([t0_us - 250_000, t0_us + 250_000], ts, df[yc].to_numpy(float))
-        return float(np.hypot(x[1] - x[0], y[1] - y[0]) / 0.5)
+        ego = avdi.get_clip_feature(cid, "egomotion.offline", maybe_stream=True)
+        df = ego["egomotion.offline"] if isinstance(ego, dict) else ego
+        tcol = "timestamp" if "timestamp" in df.columns else "timestamp_us"
+        ts = df[tcol].to_numpy(float)
+        span = ts.max() - ts.min()
+        # a clip is ~20 s: detect the unit from the recorded span
+        scale = 1.0 if span > 1e6 else (1e3 if span > 1e3 else 1e6)  # -> microseconds
+        ts = ts * scale
+        half = window_us / 2.0
+        if t0_us - half < ts.min() or t0_us + half > ts.max():
+            return None
+        x = np.interp([t0_us - half, t0_us + half], ts, df["x"].to_numpy(float))
+        y = np.interp([t0_us - half, t0_us + half], ts, df["y"].to_numpy(float))
+        return float(np.hypot(x[1] - x[0], y[1] - y[0]) / (window_us / 1e6))
     except Exception:
         return None
 
