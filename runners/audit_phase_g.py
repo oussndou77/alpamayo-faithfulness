@@ -111,9 +111,21 @@ def main():
         obst["track_id"] = obst["track_id"].astype(str)
         tdf = obst[obst["track_id"] == causal_tid].sort_values("timestamp_us")
         sx = float(tdf["size_x"].median()); sy = float(tdf["size_y"].median()); sz = float(tdf["size_z"].median())
-        masked = cf.occlude_frames(frames, ts, cam_idx, tdf, (sx, sy, sz),
-                                   avdi.get_clip_feature(cid, "camera_intrinsics", maybe_stream=True),
-                                   avdi.get_clip_feature(cid, "sensor_extrinsics", maybe_stream=True))
+        # neighbouring agents, for the intrusion check (mask must not swallow them)
+        others = []
+        for otid, odf in obst.groupby("track_id"):
+            if otid == causal_tid:
+                continue
+            odf = odf.sort_values("timestamp_us")
+            if len(odf) < 2:
+                continue
+            others.append((odf, (float(odf["size_x"].median()),
+                                 float(odf["size_y"].median()),
+                                 float(odf["size_z"].median()))))
+        intr = avdi.get_clip_feature(cid, "camera_intrinsics", maybe_stream=True)
+        extr = avdi.get_clip_feature(cid, "sensor_extrinsics", maybe_stream=True)
+        masked = cf.occlude_frames(frames, ts, cam_idx, tdf, (sx, sy, sz), intr, extr,
+                                   other_tracks=others)
 
         if args.dump_mask:
             imgs = masked.cpu().numpy() if hasattr(masked, "cpu") else np.asarray(masked)
@@ -139,8 +151,7 @@ def main():
             cdf = obst[obst["track_id"] == ctrl_tid].sort_values("timestamp_us")
             cxs = float(cdf["size_x"].median()); cys = float(cdf["size_y"].median()); czs = float(cdf["size_z"].median())
             ctrl_masked = cf.occlude_frames(frames, ts, cam_idx, cdf, (cxs, cys, czs),
-                                            avdi.get_clip_feature(cid, "camera_intrinsics", maybe_stream=True),
-                                            avdi.get_clip_feature(cid, "sensor_extrinsics", maybe_stream=True))
+                                            intr, extr)
             ctr_tr, ctr_tj, ctr_xy = cf.run_side(ctrl_masked, data, helper, model, args.k_rollouts)
             ctr_res = score_counterfactual(cid, args.agent, base_tr, base_tj, ctr_tr, ctr_tj)
             contrast = score_control_contrast(cid, res, ctr_res)

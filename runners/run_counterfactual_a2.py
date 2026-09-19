@@ -60,32 +60,132 @@ def _interp_track_xyz(track_df, t_us):
     return np.array([x, y, z])
 
 
+PAD_PX = 10          # safety margin in PIXELS (never a % of the object — see docstring)
+MIN_RECALL = 0.999   # the target must be fully covered
+MIN_PRECISION = 0.55 # mask must not be hugely larger than the object's projected hull
+MAX_INTRUSION = 0.10 # no neighbouring agent may be >10% covered
+
+
+def _polygon_mask(px, H, W, pad_px=PAD_PX):
+    """
+    Boolean (H, W) mask of the CONVEX HULL of the projected cuboid corners, dilated by
+    pad_px pixels — not the axis-aligned bounding box.
+
+    Why: at 12 m in a 30-deg tele, the parallax between the cuboid's near and far corners
+    is large, so the AABB of the 8 projected corners is far wider than the vehicle's
+    silhouette. Masking that AABB swallowed neighbouring agents. The hull follows the
+    actual projected shape; a pixel-space pad then covers calibration slack.
+    """
+    from scipy.spatial import ConvexHull
+    from matplotlib.path import Path as MplPath
+
+    pts = np.asarray(px, dtype=float)
+    if len(pts) < 3:
+        return None
+    try:
+        hull = pts[ConvexHull(pts).vertices]
+    except Exception:
+        hull = pts
+    # dilate the hull outward from its centroid, in pixels
+    c = hull.mean(axis=0)
+    v = hull - c
+    n = np.linalg.norm(v, axis=1, keepdims=True)
+    hull_pad = hull + np.divide(v, np.where(n == 0, 1, n)) * pad_px
+
+    x0 = max(0, int(np.floor(hull_pad[:, 0].min())))
+    x1 = min(W, int(np.ceil(hull_pad[:, 0].max())) + 1)
+    y0 = max(0, int(np.floor(hull_pad[:, 1].min())))
+    y1 = min(H, int(np.ceil(hull_pad[:, 1].max())) + 1)
+    if x0 >= x1 or y0 >= y1:
+        return None
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    inside = MplPath(hull_pad).contains_points(
+        np.stack([xx.ravel(), yy.ravel()], axis=1)).reshape(yy.shape)
+    mask = np.zeros((H, W), dtype=bool)
+    mask[y0:y1, x0:x1] = inside
+    return mask
+
+
+def validate_mask(mask, target_px, other_px=(), img_shape=None):
+    """
+    Automatic mask validation — replaces eyeballing (the visual inspection that caught
+    two successive sizing bugs is now an assertion).
+
+    recall    : fraction of the target's projected hull covered  -> must be ~1
+    precision : target hull area / mask area                     -> guards over-masking
+    intrusion : fraction of any OTHER agent covered              -> guards swallowing
+    Returns (ok: bool, metrics: dict, problems: list[str]).
+    """
+    from matplotlib.path import Path as MplPath
+    H, W = mask.shape
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        return False, {}, ["empty mask"]
+    mask_area = int(mask.sum())
+
+    def hull_mask(pxs):
+        m = _polygon_mask(pxs, H, W, pad_px=0)
+        return m if m is not None else np.zeros((H, W), dtype=bool)
+
+    tgt = hull_mask(target_px)
+    tgt_area = int(tgt.sum())
+    if tgt_area == 0:
+        return False, {}, ["target projects to nothing"]
+
+    recall = float((mask & tgt).sum()) / tgt_area
+    precision = tgt_area / float(mask_area)
+    problems = []
+    if recall < MIN_RECALL:
+        problems.append(f"under-mask: target only {recall:.1%} covered")
+    if precision < MIN_PRECISION:
+        problems.append(f"over-mask: mask is {1/precision:.1f}x the target hull")
+
+    worst = 0.0
+    for opx in other_px:
+        om = hull_mask(opx)
+        oa = int(om.sum())
+        if oa == 0:
+            continue
+        frac = float((mask & om).sum()) / oa
+        worst = max(worst, frac)
+        if frac > MAX_INTRUSION:
+            problems.append(f"neighbour agent {frac:.0%} covered")
+    metrics = {"recall": round(recall, 4), "precision": round(precision, 3),
+               "mask_px": mask_area, "target_px": tgt_area,
+               "worst_intrusion": round(worst, 3)}
+    return (len(problems) == 0), metrics, problems
+
+
 def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
-                   intrinsics, extrinsics, pad=1.15, max_area_frac=None):
+                   intrinsics, extrinsics, pad_px=PAD_PX, other_tracks=None,
+                   validate=True):
     """
     Mask the target track by projecting its 3D cuboid into every camera that sees it,
     at the ACTUAL timestamp of each camera frame.
 
-    Two subtleties learned the hard way on this dataset:
-      * the 4 cameras are NOT time-synchronized (front_wide[-1]=5.076s while
-        cross_left[-1]=5.094s), and the last frame is not exactly t0 — so a fixed t0
-        position mis-projects. We interpolate the track to each camera's own timestamp.
-      * obstacle-label track_id is a STRING; the caller must filter with str ids.
+    Dataset subtleties learned the hard way:
+      * cameras are NOT time-synchronized and the last frame is not exactly t0, so we
+        interpolate the track to each camera's own timestamp;
+      * obstacle-label track_id is a STRING.
 
-    Mask sizing, learned from two rounds of visual inspection:
-      * pad=1.6 on a NEAR object (7-10 m) swallowed 85% of the wide frame — no context left
-        to attribute the effect to the cited object. pad=1.15 fixes that.
-      * capping the mask area instead TRUNCATES it: the box then covers only the lower part
-        of a large nearby object and its roof stays visible — a leak. There is no good cap
-        for an object that legitimately fills most of a tele frame.
-    Conclusion (a methodological finding, not a bug): pixel occlusion is only a valid
-    intervention while the object stays a modest fraction of every camera. For nearer
-    objects use a photometric NuRec counterfactual instead. max_area_frac is therefore
-    OFF by default; set it only to DIAGNOSE which clips are too close for pixel occlusion.
+    Mask sizing — three rounds of visual inspection, three lessons:
+      1. pad=1.6x on a near object swallowed 85% of the wide frame.
+      2. capping the mask AREA instead truncates it: the box covers only the lower part
+         of a large object and its roof stays visible — a leak.
+      3. the real cause was geometric: we masked the axis-aligned bounding box of the 8
+         projected cuboid corners, and multiplied it by a percentage. At 12 m in a 30-deg
+         tele the parallax between near and far corners makes that AABB far wider than the
+         vehicle, and a 15% margin on a 690 px object is 100 px per side — enough to
+         swallow the neighbouring cars.
+    Fix: mask the CONVEX HULL of the projected corners, dilated by a fixed number of
+    PIXELS (a safety margin is a sensor/calibration quantity, never a fraction of the
+    object), and assert recall/precision/intrusion instead of eyeballing.
 
     frames: (n_cam, n_t, C, H, W). frame_timestamps: (n_cam, n_t) absolute us.
     track_df: this track's obstacle rows (already filtered), sorted by timestamp.
     size_xyz: (size_x, size_y, size_z) cuboid extents in meters.
+    other_tracks: optional list of (df, size_xyz) for neighbouring agents — used by the
+    intrusion check only.
     Returns a masked copy.
     """
     out = frames.clone()
@@ -93,8 +193,17 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
     dark = out.min()
     hs = np.array(size_xyz) / 2.0
     corner_signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
-    area_cap = (max_area_frac * H * W) if max_area_frac else None
-    masked, capped = [], []
+    masked, failures, all_metrics = [], [], []
+
+    def project(df, half_sizes, pose, model, t_us):
+        center = _interp_track_xyz(df, t_us)
+        corners = center + corner_signs * half_sizes
+        pc = np.array([pose.inv().apply(c) for c in corners])
+        if (pc[:, 2] <= 0).all():
+            return None
+        pc = pc[pc[:, 2] > 0]
+        return model.ray2pixel(pc)
+
     for cam_idx in range(out.shape[0]):
         cam_id = CAM_INDEX_TO_ID.get(int(camera_indices[cam_idx]))
         if cam_id is None:
@@ -103,40 +212,44 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
         pose = extrinsics.sensor_poses.get(cam_id)
         if model is None or pose is None:
             continue
-        # mask every time-step of this camera at its own timestamp
         boxes = []
         for t_idx in range(out.shape[1]):
             t_us = float(frame_timestamps[cam_idx, t_idx])
-            center = _interp_track_xyz(track_df, t_us)
-            corners = center + corner_signs * hs
-            pc = np.array([pose.inv().apply(c) for c in corners])
-            if (pc[:, 2] <= 0).all():
+            px = project(track_df, hs, pose, model, t_us)
+            if px is None:
                 continue
-            pc = pc[pc[:, 2] > 0]
-            px = model.ray2pixel(pc)
-            x0, y0, x1, y1 = px[:, 0].min(), px[:, 1].min(), px[:, 0].max(), px[:, 1].max()
-            cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-            bw, bh = (x1 - x0) * pad, (y1 - y0) * pad
-            # cap the masked area per camera so a near object doesn't swallow the scene
-            if area_cap is not None and bw * bh > area_cap:
-                scale = (area_cap / (bw * bh)) ** 0.5
-                bw, bh = bw * scale, bh * scale
-                capped.append(cam_idx)
-            lo_x, hi_x = int(max(0, cx - bw / 2)), int(min(W, cx + bw / 2))
-            lo_y, hi_y = int(max(0, cy - bh / 2)), int(min(H, cy + bh / 2))
-            if lo_x < hi_x and lo_y < hi_y:
-                out[cam_idx, t_idx, :, lo_y:hi_y, lo_x:hi_x] = dark
-                boxes.append(t_idx)
+            mask = _polygon_mask(px, H, W, pad_px=pad_px)
+            if mask is None or not mask.any():
+                continue
+            if validate:
+                others = []
+                for odf, osize in (other_tracks or []):
+                    opx = project(odf, np.array(osize) / 2.0, pose, model, t_us)
+                    if opx is not None:
+                        others.append(opx)
+                ok, metrics, problems = validate_mask(mask, px, others)
+                all_metrics.append((cam_idx, t_idx, metrics))
+                if not ok:
+                    failures.append(f"cam{cam_idx} t{t_idx}: " + "; ".join(problems))
+            out[cam_idx, t_idx][:, mask] = dark
+            boxes.append(t_idx)
         if boxes:
             masked.append(f"cam{cam_idx}({cam_id.split('_')[1]}) t={boxes}")
+
     if masked:
-        print(f"[occlude] projected & masked: {', '.join(masked)}")
+        print(f"[occlude] projected & masked (convex hull + {pad_px}px): {', '.join(masked)}")
     else:
         print("[occlude] WARNING agent not visible in any camera/timestep")
-    if capped:
-        cams = sorted(set(capped))
-        print(f"[occlude] NOTE mask exceeded {max_area_frac:.0%} of cam(s) {cams} before capping "
-              f"(object too near) — this clip belongs to the photometric NuRec track, not pixel occlusion")
+    if validate and all_metrics:
+        rec = min(m["recall"] for _, _, m in all_metrics)
+        prec = min(m["precision"] for _, _, m in all_metrics)
+        intr = max(m["worst_intrusion"] for _, _, m in all_metrics)
+        print(f"[validate] worst recall {rec:.3f} | worst precision {prec:.2f} | "
+              f"worst neighbour intrusion {intr:.0%}")
+    if failures:
+        print("[validate] FAILED checks:")
+        for f in failures:
+            print(f"    {f}")
     return out
 
 
