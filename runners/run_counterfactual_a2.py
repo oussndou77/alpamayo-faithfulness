@@ -196,13 +196,14 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
     masked, failures, all_metrics = [], [], []
 
     def project(df, half_sizes, pose, model, t_us):
+        """-> (pixels, median depth in metres) or None if fully behind the camera."""
         center = _interp_track_xyz(df, t_us)
         corners = center + corner_signs * half_sizes
         pc = np.array([pose.inv().apply(c) for c in corners])
         if (pc[:, 2] <= 0).all():
             return None
         pc = pc[pc[:, 2] > 0]
-        return model.ray2pixel(pc)
+        return model.ray2pixel(pc), float(np.median(pc[:, 2]))
 
     for cam_idx in range(out.shape[0]):
         cam_id = CAM_INDEX_TO_ID.get(int(camera_indices[cam_idx]))
@@ -215,18 +216,30 @@ def occlude_frames(frames, frame_timestamps, camera_indices, track_df, size_xyz,
         boxes = []
         for t_idx in range(out.shape[1]):
             t_us = float(frame_timestamps[cam_idx, t_idx])
-            px = project(track_df, hs, pose, model, t_us)
-            if px is None:
+            proj = project(track_df, hs, pose, model, t_us)
+            if proj is None:
                 continue
+            px, target_depth = proj
             mask = _polygon_mask(px, H, W, pad_px=pad_px)
             if mask is None or not mask.any():
                 continue
             if validate:
+                # Only neighbours the target does NOT already occlude can be "swallowed".
+                # An agent farther away and behind the target is invisible in the ORIGINAL
+                # frame too, so masking the target takes nothing from it. Depth ordering is
+                # what makes this check meaningful (without it, every car queued behind the
+                # lead vehicle counts as 100% covered).
                 others = []
                 for odf, osize in (other_tracks or []):
-                    opx = project(odf, np.array(osize) / 2.0, pose, model, t_us)
-                    if opx is not None:
-                        others.append(opx)
+                    oproj = project(odf, np.array(osize) / 2.0, pose, model, t_us)
+                    if oproj is None:
+                        continue
+                    opx, odepth = oproj
+                    if odepth > target_depth * 0.95:      # behind the target -> already hidden
+                        continue
+                    if len(opx) < 3:                      # degenerate projection
+                        continue
+                    others.append(opx)
                 ok, metrics, problems = validate_mask(mask, px, others)
                 all_metrics.append((cam_idx, t_idx, metrics))
                 if not ok:
