@@ -5,7 +5,19 @@ find_t0.py — for each Phase-G clip, find the t0 (microseconds) where the cited
 MOST blocking, so the GPU audit spends no rollout searching for the right moment.
 
 CPU-only: streams obstacle labels, interpolates each track, and scores "blocking-ness"
-over a grid of candidate t0 values. Blocking-ness = close (small x) AND centered (small
+over a grid of candidate t0 values.
+
+CAUSAL UNIQUENESS (learned from the first Phase-G run). Geometry alone is not enough:
+occluding a single object only tests causal attribution when that object is the ONLY
+sufficient cause of the maneuver. Two failure modes found empirically:
+  * overdetermination — the ego stops for a lead vehicle AND a red light; removing the
+    vehicle leaves the light, so the trajectory cannot change (clip 15eaddae: the text
+    correctly re-attributed to "red traffic light ahead", citation 95% -> 0%, but the car
+    was already stopped, so there was no action-side margin at all);
+  * redundancy — in a queue, removing one vehicle promotes the next one to lead vehicle,
+    so the explanation stays literally true (clip 0fa7060f: citation 100% -> 100%).
+--unique therefore requires a single in-path agent, an ego actually moving at t0, and no
+other in-path agent close behind the target. Blocking-ness = close (small x) AND centered (small
 |y|) AND in the actionable range. Writes a small JSON the audit runner consumes.
 
 Usage:
@@ -32,6 +44,11 @@ LANE_HALF_WIDTH_M = 1.8
 # photometric NuRec track. Above ~25 m the object stops forcing a real maneuver.
 MASKABLE_X_MIN, MASKABLE_X_MAX = 12.0, 25.0
 
+# causal-uniqueness thresholds (see docstring)
+QUEUE_GAP_M = 15.0        # another in-path agent within this distance behind the target
+                          # would simply become the new lead vehicle -> redundant cause
+MIN_EGO_SPEED_MS = 2.0    # a stopped ego has no action-side margin to measure
+
 
 def blocking_score(x, y, sx, sy, x_min=X_MIN, x_max=X_MAX):
     if not (x_min < x < x_max and abs(y) < LANE_HALF_WIDTH_M):
@@ -40,6 +57,38 @@ def blocking_score(x, y, sx, sy, x_min=X_MIN, x_max=X_MAX):
     centered = max(0.0, 1.0 - abs(y) / LANE_HALF_WIDTH_M)
     size = min(1.0, (sx * sy) / 8.0)
     return 0.45 * centered + 0.35 * closeness + 0.20 * size
+
+
+def _ego_speed(avdi, cid, t0_us):
+    """Ego speed (m/s) at t0 from the ego-motion feature; None if unavailable."""
+    import numpy as np
+    try:
+        ego = avdi.get_clip_feature(cid, "egomotion", maybe_stream=True)
+        df = list(ego.values())[0] if isinstance(ego, dict) else ego
+        ts = df["timestamp_us"].to_numpy(float)
+        xc = "x" if "x" in df.columns else "center_x"
+        yc = "y" if "y" in df.columns else "center_y"
+        x = np.interp([t0_us - 250_000, t0_us + 250_000], ts, df[xc].to_numpy(float))
+        y = np.interp([t0_us - 250_000, t0_us + 250_000], ts, df[yc].to_numpy(float))
+        return float(np.hypot(x[1] - x[0], y[1] - y[0]) / 0.5)
+    except Exception:
+        return None
+
+
+def _inpath_agents(obst, t0_us, xcol, ycol, x_far=60.0):
+    """All agents in the ego corridor at t0, as (track_id, x, y), sorted by distance."""
+    import numpy as np
+    out = []
+    for tid, tdf in obst.groupby("track_id"):
+        tdf = tdf.sort_values("timestamp_us")
+        ts = tdf["timestamp_us"].to_numpy(float)
+        if t0_us < ts.min() or t0_us > ts.max():
+            continue
+        x = float(np.interp(t0_us, ts, tdf[xcol].to_numpy(float)))
+        y = float(np.interp(t0_us, ts, tdf[ycol].to_numpy(float)))
+        if 0 < x < x_far and abs(y) < LANE_HALF_WIDTH_M:
+            out.append((tid, x, y))
+    return sorted(out, key=lambda r: r[1])
 
 
 def _clips_from_csv(path, top):
@@ -87,6 +136,10 @@ def main():
     ap.add_argument("--maskable", action="store_true",
                     help=f"restrict to objects in [{MASKABLE_X_MIN}, {MASKABLE_X_MAX}] m — the range "
                          "where pixel occlusion covers the object cleanly on every camera")
+    ap.add_argument("--unique", action="store_true",
+                    help="require a UNIQUE sufficient cause: exactly one in-path agent, "
+                         "no follower within QUEUE_GAP_M behind it, and a moving ego — "
+                         "without this, occlusion cannot change the action (see docstring)")
     ap.add_argument("--x-min", type=float, default=None)
     ap.add_argument("--x-max", type=float, default=None)
     ap.add_argument("--out", default="outputs/phase_g_t0.json")
@@ -133,10 +186,33 @@ def main():
                         best = {"score": round(sc, 3), "t0_us": int(t0),
                                 "track_id": tid, "x": round(x, 1), "y": round(y, 2),
                                 "size": [round(sx, 1), round(sy, 1)]}
+            if args.unique and best.get("t0_us"):
+                t0 = best["t0_us"]
+                agents = _inpath_agents(obst, t0, xcol, ycol)
+                n_inpath = len(agents)
+                tgt_x = best["x"]
+                followers = [a for a in agents
+                             if a[0] != best["track_id"] and tgt_x < a[1] < tgt_x + QUEUE_GAP_M]
+                speed = _ego_speed(avdi, cid, t0)
+                reasons = []
+                if n_inpath > 1 and followers:
+                    reasons.append(f"queue: {len(followers)} agent(s) right behind target")
+                if speed is not None and speed < MIN_EGO_SPEED_MS:
+                    reasons.append(f"ego nearly stopped ({speed:.1f} m/s) — no action margin")
+                best["n_inpath"] = n_inpath
+                best["ego_speed_ms"] = round(speed, 2) if speed is not None else None
+                if reasons:
+                    best["rejected"] = "; ".join(reasons)
+                    print(f"{cid[:8]}  SKIP ({best['rejected']})")
+                    results[cid] = best
+                    continue
             results[cid] = best
             b = best
+            extra = ""
+            if args.unique:
+                extra = f"  n_inpath={b.get('n_inpath')} ego={b.get('ego_speed_ms')} m/s"
             print(f"{cid[:8]}  best t0={b['t0_us']}  track={b['track_id']}  "
-                  f"x={b['x']} y={b['y']} score={b['score']}")
+                  f"x={b['x']} y={b['y']} score={b['score']}{extra}")
         except Exception as e:
             print(f"{cid[:8]}  skip: {e}")
             results[cid] = {"error": str(e)}
