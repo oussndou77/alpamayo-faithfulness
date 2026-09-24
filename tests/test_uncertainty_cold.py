@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import numpy as np
 
 from afh.degradation import (
-    DegradationSpec, FAMILIES, STOP_SEVERITY, UNCERTAINTY_LEVELS, apply_degradation,
+    ALPHA_SPEED, BETA_LATERAL, BLEND_SEVERITY, DegradationSpec, FAMILIES, STOP_SEVERITY,
+    UNCERTAINTY_LEVELS, apply_degradation,
     combo_key, compose, sample_composite_spec, target_text, target_trajectory,
     uncertainty_score,
 )
@@ -147,6 +148,116 @@ def test_composite_reaching_stop_severity():
     tgt = target_trajectory(xy, spec.severity)
     steps = np.diff(tgt[:, 0], prepend=0.0)
     assert abs(steps[-1]) < 1e-9 and (np.diff(steps) <= 1e-9).all()
+
+
+def _target_trajectory_main(xy_true, severity, alpha=ALPHA_SPEED, beta=BETA_LATERAL):
+    """Frozen copy of target_trajectory as merged in #1 (hard switch at STOP_SEVERITY)."""
+    xy = np.asarray(xy_true, dtype=float)
+    s = float(np.clip(severity, 0, 1))
+    if s <= 0:
+        return xy.copy()
+    steps = np.diff(xy[:, 0], prepend=0.0)
+    if s >= STOP_SEVERITY:
+        steps = steps * np.linspace(1.0, 0.0, xy.shape[0])
+    else:
+        steps = steps * (1.0 - alpha * s)
+    return np.stack([np.cumsum(steps), xy[:, 1] * (1.0 - beta * s)], axis=1)
+
+
+def _realistic_future(seed, T=64):
+    """Forward-moving future with varying speed and a lateral drift (no reversing)."""
+    rng = np.random.default_rng(seed)
+    v = np.clip(8.0 + np.cumsum(rng.normal(0, 0.3, T)), 0.5, None) * 0.1
+    return np.stack([np.cumsum(v), np.cumsum(rng.normal(0, 0.02, T))], 1)
+
+
+def test_target_trajectory_distance_strictly_decreasing():
+    grid = np.linspace(0.0, 1.0, 201)                 # step 0.005, includes 0.70 and 0.95
+    assert np.isclose(grid, BLEND_SEVERITY).any() and np.isclose(grid, STOP_SEVERITY).any()
+    for seed in range(5):
+        xy = _realistic_future(seed)
+        dist = np.array([target_trajectory(xy, s)[-1, 0] for s in grid])
+        assert (np.diff(dist) < 0).all(), f"not strictly decreasing (seed {seed})"
+        # continuous (a kink at s0, no jump): at s0 and at STOP_SEVERITY the distance
+        # changes by O(eps) across +-eps. The merged version jumped UP at 0.95.
+        eps = 1e-6
+        for knot in (BLEND_SEVERITY, STOP_SEVERITY):
+            lo, hi = target_trajectory(xy, knot - eps)[-1, 0], target_trajectory(xy, knot + eps)[-1, 0]
+            assert 0 < lo - hi < 10 * eps * dist[0], (seed, knot, lo - hi)
+        old_lo = _target_trajectory_main(xy, STOP_SEVERITY - eps)[-1, 0]
+        old_hi = _target_trajectory_main(xy, STOP_SEVERITY + eps)[-1, 0]
+        assert old_hi - old_lo > 0.01 * dist[0], "sanity: the check must catch the old jump"
+
+
+def test_target_trajectory_stops_at_full_severity():
+    for seed in range(5):
+        xy = _realistic_future(seed)
+        tgt = target_trajectory(xy, 1.0)
+        steps = np.diff(tgt[:, 0], prepend=0.0)
+        assert abs(steps[-1]) < 1e-12, "s = 1 must end at zero speed"
+        assert (steps >= 0).all() and tgt[-1, 0] > 0
+        assert np.allclose(tgt[:, 1], xy[:, 1] * (1 - BETA_LATERAL))  # lateral policy unchanged
+
+
+def test_target_trajectory_stops_for_every_stop_severity():
+    """Final speed is exactly zero for every s >= STOP_SEVERITY, and never below it."""
+    above = np.round(np.linspace(STOP_SEVERITY, 1.0, 51), 6)
+    below = np.round(np.linspace(0.05, STOP_SEVERITY, 90, endpoint=False), 6)
+    for seed in range(5):
+        xy = _realistic_future(seed)
+        for s in above:
+            steps = np.diff(target_trajectory(xy, s)[:, 0], prepend=0.0)
+            assert steps[-1] == 0.0, (seed, s, steps[-1])
+        for s in below:
+            steps = np.diff(target_trajectory(xy, s)[:, 0], prepend=0.0)
+            assert steps[-1] > 1e-6, (seed, s, steps[-1])
+
+
+def test_text_and_trajectory_targets_agree_on_stopping():
+    """The harness audits text vs action: the targets themselves must never disagree.
+    "controlled stop" appears in target_text exactly when target_trajectory ends at rest."""
+    f = _frames()
+    xy = _realistic_future(0)
+    for s in np.round(np.linspace(0.05, 1.0, 96), 6):
+        for spec in (DegradationSpec("blur", float(s), [1], seed=3),
+                     compose(("glare", float(s), [1]), ("noise", 0.0, [2]), seed=3)):
+            _, spec = apply_degradation(f, spec)
+            says_stop = "controlled stop" in target_text(spec)
+            steps = np.diff(target_trajectory(xy, spec.severity)[:, 0], prepend=0.0)
+            assert says_stop == (steps[-1] == 0.0), (s, spec.severity, says_stop, steps[-1])
+
+
+def test_text_does_not_claim_constant_speed_when_trajectory_slows():
+    """For every s > 0: if the trajectory target is slower than the true future, the text
+    target must not say "maintaining lane and speed"."""
+    f = _frames()
+    grid = np.round(np.concatenate([np.linspace(0.001, 0.2, 40), np.linspace(0.2, 1.0, 81)]), 6)
+    for seed in range(3):
+        xy = _realistic_future(seed)
+        for s in grid:
+            for spec in (DegradationSpec(FAMILIES[int(s * 1000) % len(FAMILIES)], float(s), [1],
+                                         seed=seed),
+                         compose(("glare", float(s), [1]), ("blur", 0.0, [0]), seed=seed)):
+                _, spec = apply_degradation(f, spec)
+                slower = target_trajectory(xy, spec.severity)[-1, 0] < xy[-1, 0]
+                text = target_text(spec).lower()
+                assert slower, (s, "every degraded target is slower than the true future")
+                assert "maintaining lane and speed" not in text, (s, text)
+                assert "reducing speed" in text or "slowing" in text or "decelerating" in text, text
+    # clean input keeps the model's own wording / the constant-speed default
+    clean = DegradationSpec("clean", 0.0)
+    assert "maintaining lane and speed" in target_text(clean)
+    np.testing.assert_array_equal(target_trajectory(_realistic_future(0), 0.0), _realistic_future(0))
+
+
+def test_target_trajectory_unchanged_below_blend():
+    grid = [s for s in np.round(np.linspace(0.0, 1.0, 201), 6) if s <= BLEND_SEVERITY]
+    grid += [0.15, 0.333, 0.45, 0.6999]
+    for seed in range(5):
+        xy = _realistic_future(seed)
+        for s in grid:
+            np.testing.assert_array_equal(target_trajectory(xy, s),
+                                          _target_trajectory_main(xy, s), err_msg=f"s={s}")
 
 
 # --------------------------------------------------------------------------- split

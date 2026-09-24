@@ -48,7 +48,8 @@ FAMILIES = ("blackout", "glare", "occlusion", "blur", "noise", "freeze", "desync
 # ---- target-policy constants (a POLICY, documented as such) ----
 ALPHA_SPEED = 0.6       # v_target = v_true * (1 - ALPHA * s)
 BETA_LATERAL = 0.5      # lateral_target = lateral_true * (1 - BETA * s)
-STOP_SEVERITY = 0.95    # at/above this, target is a controlled stop
+STOP_SEVERITY = 0.95    # at/above this, target TEXT announces a controlled stop
+BLEND_SEVERITY = 0.70   # s0: above this, the target trajectory blends toward a stop ramp
 CLEAN_FRACTION = 0.40   # share of s = 0 examples in a generated dataset
 
 
@@ -421,9 +422,11 @@ UNCERTAINTY_LEVELS = [
     (0.95, "I have no usable visual input and cannot assess the scene"),
 ]
 
+# Degraded targets only (s > 0): target_trajectory damps speed by (1 - ALPHA * s) from any
+# s > 0, so the mildest action must already describe a slowdown. "maintaining lane and
+# speed" is reserved for clean input (s = 0), where the trajectory target is the true one.
 _ACTION = [
-    (0.00, "maintaining lane and speed"),
-    (0.20, "maintaining lane, slightly reducing speed"),
+    (0.00, "maintaining lane, slightly reducing speed"),
     (0.45, "reducing speed and increasing lateral margin"),
     (0.70, "slowing down significantly and holding the lane center"),
     (STOP_SEVERITY, "decelerating to a controlled stop within the current lane"),
@@ -473,15 +476,29 @@ def _observation(family: str, cams: list[int]) -> str:
 
 def target_trajectory(xy_true: np.ndarray, severity: float,
                       alpha: float = ALPHA_SPEED, beta: float = BETA_LATERAL,
-                      dt: float = 0.1) -> np.ndarray:
+                      dt: float = 0.1, s0: float = BLEND_SEVERITY,
+                      s_stop: float = STOP_SEVERITY) -> np.ndarray:
     """
     Conservative damping of the TRUE future (T, 2) in the rig frame (x forward, y left).
 
     speed   -> scaled by (1 - alpha * s), i.e. cumulative forward progress shrinks
     lateral -> scaled by (1 - beta * s), pulled toward the lane center (y = 0)
-    s >= STOP_SEVERITY -> smooth deceleration to a stop (progress saturates)
+    s > s0  -> (s0 = BLEND_SEVERITY) the damped increments are further blended toward a
+               linear deceleration ramp, continuously in s:
 
-    This is a POLICY, not ground truth. Document alpha/beta as choices.
+                   steps * (1 - alpha * s) * ((1 - w) + w * ramp)
+                   w = min(1, (s - s0) / (STOP_SEVERITY - s0)),   ramp = linspace(1, 0, T)
+
+               w = 0 at s0 (no jump). w reaches 1 at STOP_SEVERITY, the same threshold at
+               which target_text announces "decelerating to a controlled stop": for every
+               s >= STOP_SEVERITY the final increment is exactly zero, and below it the
+               target never comes to rest. Text and trajectory targets therefore never
+               disagree on whether the car stops. Forward progress is strictly decreasing
+               in s over [0, 1] (between STOP_SEVERITY and 1 through the (1 - alpha * s)
+               factor). The previous hard switch at STOP_SEVERITY travelled FURTHER than
+               the damped target just below it. Below s0 the target is unchanged.
+
+    This is a POLICY, not ground truth. Document alpha/beta/s0 as choices.
     """
     xy = np.asarray(xy_true, dtype=float)
     s = float(np.clip(severity, 0, 1))
@@ -490,12 +507,11 @@ def target_trajectory(xy_true: np.ndarray, severity: float,
     T = xy.shape[0]
     steps = np.diff(xy[:, 0], prepend=0.0)               # forward increments
     lat = xy[:, 1]
-    if s >= STOP_SEVERITY:
-        # linear decel: increments decay to zero over the horizon
+    steps = steps * (1.0 - alpha * s)
+    if s > s0:
+        w = min(1.0, (s - s0) / (s_stop - s0))
         ramp = np.linspace(1.0, 0.0, T)
-        steps = steps * ramp
-    else:
-        steps = steps * (1.0 - alpha * s)
+        steps = steps * ((1.0 - w) + w * ramp)
     x_new = np.cumsum(steps)
     y_new = lat * (1.0 - beta * s)
     return np.stack([x_new, y_new], axis=1)
