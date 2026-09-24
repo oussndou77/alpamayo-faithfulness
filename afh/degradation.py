@@ -52,6 +52,12 @@ STOP_SEVERITY = 0.95    # at/above this, target TEXT announces a controlled stop
 BLEND_SEVERITY = 0.70   # s0: above this, the target trajectory blends toward a stop ramp
 CLEAN_FRACTION = 0.40   # share of s = 0 examples in a generated dataset
 
+# ---- camera-aware target severity (a POLICY, see target_severity) ----
+FRONT_CAMERAS = (1, 6)  # loader order: 1 = front_wide, 6 = front_tele
+BLACKOUT_ONE_FRONT_FLOOR = 0.45   # a forward camera is black -> "visibility ahead is reduced"
+BLACKOUT_ALL_FRONT_FLOOR = 0.70   # no forward camera left -> "I cannot confirm ..."
+# every camera black -> STOP_SEVERITY ("I have no usable visual input"): the issue #9 case
+
 
 COMPOSITE = "composite"
 
@@ -204,7 +210,7 @@ def _blackout(frames, spec, rng):
     cams = spec.cameras or _choose_cameras(rng, frames.shape[0], spec.severity)
     out[cams] = 0
     spec.cameras = cams
-    spec.params = {"n_cameras": len(cams)}
+    spec.params = {"n_cameras": len(cams), "n_cam_total": int(frames.shape[0])}
     return out
 
 
@@ -483,7 +489,47 @@ def target_text(spec: DegradationSpec, clean_reasoning: Optional[str] = None) ->
         obs = "; ".join([obs[0]] + [o[0].lower() + o[1:] for o in obs[1:]])
     else:
         obs = _observation(spec.family, spec.cameras or [], spec.severity)
-    return f"{obs}; {_level(UNCERTAINTY_LEVELS, spec.severity)}. {_level(_ACTION, spec.severity).capitalize()}."
+    ts = target_severity(spec)
+    return f"{obs}; {_level(UNCERTAINTY_LEVELS, ts)}. {_level(_ACTION, ts).capitalize()}."
+
+
+def target_severity(spec) -> float:
+    """
+    Severity the TARGETS (uncertainty level, action, trajectory) are built from. It is
+    spec.severity (the physical intensity of the degradation) raised, never lowered, when
+    the fault removes the forward view, because WHICH cameras are hit matters and not only
+    how many:
+
+      blackout of one front camera (front_wide or front_tele)  -> at least 0.45
+      blackout of every front camera                           -> at least 0.70
+      blackout of every camera                                 -> at least STOP_SEVERITY
+
+    Without this, a front-camera blackout at s = 0.15 produced "Front camera is returning
+    no image; the road ahead is clearly visible", the exact failure reported in
+    NVlabs/alpamayo2 issue #9, taught as a training target. Only blackout gets a floor:
+    it is the one family that destroys the camera's image entirely at ANY severity; the
+    other families damage the image in proportion to s, which the level already follows.
+
+    Call it on a spec resolved by apply_degradation (cameras and params filled).
+    Composites: noisy-OR of the components' target severities.
+    """
+    d = spec.to_dict() if isinstance(spec, DegradationSpec) else spec
+    if d["family"] == COMPOSITE:
+        return combine_severities(target_severity(c) for c in d.get("components", [])
+                                  if c["family"] != "clean")
+    s = float(d.get("severity", 0.0))
+    if d["family"] != "blackout" or s <= 0:
+        return s
+    lost = set(d.get("cameras") or [])
+    n_total = (d.get("params") or {}).get("n_cam_total")
+    fronts = [c for c in FRONT_CAMERAS if n_total is None or c < n_total]
+    if n_total is not None and len(lost) >= n_total:
+        return max(s, STOP_SEVERITY)
+    if fronts and set(fronts) <= lost:
+        return max(s, BLACKOUT_ALL_FRONT_FLOOR)
+    if lost & set(fronts):
+        return max(s, BLACKOUT_ONE_FRONT_FLOOR)
+    return s
 
 
 def _observation(family: str, cams: list[int], severity: float) -> str:

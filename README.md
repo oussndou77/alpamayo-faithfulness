@@ -286,7 +286,13 @@ complete and runs cold; training is the next step.
   itself is graded by the fault's own severity (slight / moderate / strong, bands at the
   0.45 and 0.70 uncertainty thresholds, per component in a composite), so a mild glare is
   never described as « strong glare is saturating » the camera. Its wording never shifts
-  the parsed uncertainty level. Cold tests enforce all of these properties.
+  the parsed uncertainty level. The targets also depend on *which* cameras are hit, not
+  only how many. A black forward camera (front_wide or front_tele) raises the target to at
+  least « visibility ahead is reduced », losing both forward cameras raises it to at least
+  « I cannot confirm the road ahead is clear », and losing every camera means « no usable
+  visual input » and a controlled stop. So no target ever teaches the issue #9 failure
+  (a blind front camera narrated as « the road ahead is clearly visible »). Cold tests
+  enforce all of these properties.
 - **`afh/uncertainty_dataset.py`** — the "dataset" is a JSONL manifest of a few hundred
   bytes per example (clip, spec, targets); frames are re-loaded and re-degraded at
   training time, so nothing heavy is stored and every example is reproducible. ~40% clean
