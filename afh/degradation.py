@@ -48,7 +48,8 @@ FAMILIES = ("blackout", "glare", "occlusion", "blur", "noise", "freeze", "desync
 # ---- target-policy constants (a POLICY, documented as such) ----
 ALPHA_SPEED = 0.6       # v_target = v_true * (1 - ALPHA * s)
 BETA_LATERAL = 0.5      # lateral_target = lateral_true * (1 - BETA * s)
-STOP_SEVERITY = 0.95    # at/above this, target is a controlled stop
+STOP_SEVERITY = 0.95    # at/above this, target TEXT announces a controlled stop
+BLEND_SEVERITY = 0.70   # s0: above this, the target trajectory blends toward a stop ramp
 CLEAN_FRACTION = 0.40   # share of s = 0 examples in a generated dataset
 
 
@@ -473,15 +474,24 @@ def _observation(family: str, cams: list[int]) -> str:
 
 def target_trajectory(xy_true: np.ndarray, severity: float,
                       alpha: float = ALPHA_SPEED, beta: float = BETA_LATERAL,
-                      dt: float = 0.1) -> np.ndarray:
+                      dt: float = 0.1, s0: float = BLEND_SEVERITY) -> np.ndarray:
     """
     Conservative damping of the TRUE future (T, 2) in the rig frame (x forward, y left).
 
     speed   -> scaled by (1 - alpha * s), i.e. cumulative forward progress shrinks
     lateral -> scaled by (1 - beta * s), pulled toward the lane center (y = 0)
-    s >= STOP_SEVERITY -> smooth deceleration to a stop (progress saturates)
+    s > s0  -> (s0 = BLEND_SEVERITY) the damped increments are further blended toward a
+               linear deceleration ramp, continuously in s:
 
-    This is a POLICY, not ground truth. Document alpha/beta as choices.
+                   steps * (1 - alpha * s) * ((1 - w) + w * ramp)
+                   w = (s - s0) / (1 - s0),   ramp = linspace(1, 0, T)
+
+               w = 0 at s0 (no jump), w = 1 at s = 1 (increments reach zero: full stop).
+               Forward progress is therefore strictly decreasing in s over [0, 1]; the
+               previous hard switch at STOP_SEVERITY travelled FURTHER than the damped
+               target just below it. Below s0 the target is unchanged.
+
+    This is a POLICY, not ground truth. Document alpha/beta/s0 as choices.
     """
     xy = np.asarray(xy_true, dtype=float)
     s = float(np.clip(severity, 0, 1))
@@ -490,12 +500,11 @@ def target_trajectory(xy_true: np.ndarray, severity: float,
     T = xy.shape[0]
     steps = np.diff(xy[:, 0], prepend=0.0)               # forward increments
     lat = xy[:, 1]
-    if s >= STOP_SEVERITY:
-        # linear decel: increments decay to zero over the horizon
+    steps = steps * (1.0 - alpha * s)
+    if s > s0:
+        w = (s - s0) / (1.0 - s0)
         ramp = np.linspace(1.0, 0.0, T)
-        steps = steps * ramp
-    else:
-        steps = steps * (1.0 - alpha * s)
+        steps = steps * ((1.0 - w) + w * ramp)
     x_new = np.cumsum(steps)
     y_new = lat * (1.0 - beta * s)
     return np.stack([x_new, y_new], axis=1)

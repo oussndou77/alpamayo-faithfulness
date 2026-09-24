@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import numpy as np
 
 from afh.degradation import (
-    DegradationSpec, FAMILIES, STOP_SEVERITY, UNCERTAINTY_LEVELS, apply_degradation,
+    ALPHA_SPEED, BETA_LATERAL, BLEND_SEVERITY, DegradationSpec, FAMILIES, STOP_SEVERITY,
+    UNCERTAINTY_LEVELS, apply_degradation,
     combo_key, compose, sample_composite_spec, target_text, target_trajectory,
     uncertainty_score,
 )
@@ -142,11 +143,72 @@ def test_composite_reaching_stop_severity():
     assert "I have no usable visual input and cannot assess the scene" in text, text
     assert "controlled stop" in text
     assert uncertainty_score(text) == UNCERTAINTY_LEVELS[-1][0]
-    # the target trajectory is the controlled-stop policy: progress decays to zero
+    # the target trajectory decelerates throughout and travels less than just below the
+    # stop level; it reaches zero speed only at s = 1 (see test_target_trajectory_*)
     xy = np.stack([np.arange(1, 21) * 1.0, np.zeros(20)], 1)
     tgt = target_trajectory(xy, spec.severity)
     steps = np.diff(tgt[:, 0], prepend=0.0)
-    assert abs(steps[-1]) < 1e-9 and (np.diff(steps) <= 1e-9).all()
+    assert (np.diff(steps) < 0).all()
+    assert tgt[-1, 0] < target_trajectory(xy, 0.936)[-1, 0]
+
+
+def _target_trajectory_main(xy_true, severity, alpha=ALPHA_SPEED, beta=BETA_LATERAL):
+    """Frozen copy of target_trajectory as merged in #1 (hard switch at STOP_SEVERITY)."""
+    xy = np.asarray(xy_true, dtype=float)
+    s = float(np.clip(severity, 0, 1))
+    if s <= 0:
+        return xy.copy()
+    steps = np.diff(xy[:, 0], prepend=0.0)
+    if s >= STOP_SEVERITY:
+        steps = steps * np.linspace(1.0, 0.0, xy.shape[0])
+    else:
+        steps = steps * (1.0 - alpha * s)
+    return np.stack([np.cumsum(steps), xy[:, 1] * (1.0 - beta * s)], axis=1)
+
+
+def _realistic_future(seed, T=64):
+    """Forward-moving future with varying speed and a lateral drift (no reversing)."""
+    rng = np.random.default_rng(seed)
+    v = np.clip(8.0 + np.cumsum(rng.normal(0, 0.3, T)), 0.5, None) * 0.1
+    return np.stack([np.cumsum(v), np.cumsum(rng.normal(0, 0.02, T))], 1)
+
+
+def test_target_trajectory_distance_strictly_decreasing():
+    grid = np.linspace(0.0, 1.0, 201)                 # step 0.005, includes 0.70 and 0.95
+    assert np.isclose(grid, BLEND_SEVERITY).any() and np.isclose(grid, STOP_SEVERITY).any()
+    for seed in range(5):
+        xy = _realistic_future(seed)
+        dist = np.array([target_trajectory(xy, s)[-1, 0] for s in grid])
+        assert (np.diff(dist) < 0).all(), f"not strictly decreasing (seed {seed})"
+        # continuous (a kink at s0, no jump): at s0 and at STOP_SEVERITY the distance
+        # changes by O(eps) across +-eps. The merged version jumped UP at 0.95.
+        eps = 1e-6
+        for knot in (BLEND_SEVERITY, STOP_SEVERITY):
+            lo, hi = target_trajectory(xy, knot - eps)[-1, 0], target_trajectory(xy, knot + eps)[-1, 0]
+            assert 0 < lo - hi < 10 * eps * dist[0], (seed, knot, lo - hi)
+        old_lo = _target_trajectory_main(xy, STOP_SEVERITY - eps)[-1, 0]
+        old_hi = _target_trajectory_main(xy, STOP_SEVERITY + eps)[-1, 0]
+        assert old_hi - old_lo > 0.01 * dist[0], "sanity: the check must catch the old jump"
+
+
+def test_target_trajectory_stops_at_full_severity():
+    for seed in range(5):
+        xy = _realistic_future(seed)
+        tgt = target_trajectory(xy, 1.0)
+        steps = np.diff(tgt[:, 0], prepend=0.0)
+        assert abs(steps[-1]) < 1e-12, "s = 1 must end at zero speed"
+        assert (steps >= 0).all() and tgt[-1, 0] > 0
+        assert np.allclose(tgt[:, 1], xy[:, 1] * (1 - BETA_LATERAL))  # lateral policy unchanged
+
+
+def test_target_trajectory_unchanged_below_blend():
+    grid = [s for s in np.round(np.linspace(0.0, 1.0, 201), 6) if s <= BLEND_SEVERITY]
+    grid += [0.15, 0.333, 0.45, 0.6999]
+    for seed in range(5):
+        xy = _realistic_future(seed)
+        for s in grid:
+            np.testing.assert_array_equal(target_trajectory(xy, s),
+                                          _target_trajectory_main(xy, s), err_msg=f"s={s}")
 
 
 # --------------------------------------------------------------------------- split

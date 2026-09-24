@@ -275,7 +275,9 @@ complete and runs cold; training is the next step.
   blur, low-light noise, frozen frames, cross-camera desync. Plus the **target policy**:
   a graded uncertainty statement (*"two forward cameras are obstructed; I cannot confirm
   the road ahead is clear"*) and a conservatively damped trajectory. The damping constants
-  are a stated policy, not ground truth.
+  are a stated policy, not ground truth. Above s₀ = 0.70 the damped trajectory blends
+  continuously toward a linear stop ramp, reaching a full stop at s = 1, so the distance the
+  target travels strictly decreases as severity rises, with no jump.
 - **`afh/uncertainty_dataset.py`** — the "dataset" is a JSONL manifest of a few hundred
   bytes per example (clip, spec, targets); frames are re-loaded and re-degraded at
   training time, so nothing heavy is stored and every example is reproducible. ~40% clean
