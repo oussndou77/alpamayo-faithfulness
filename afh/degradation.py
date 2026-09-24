@@ -403,15 +403,43 @@ def normalize_combo(c) -> str:
 _CAM_NAMES = {0: "front-left", 1: "front", 2: "front-right", 3: "rear-left",
               4: "rear", 5: "rear-right", 6: "front telephoto"}
 
+# Observation wording is graded by the severity of the fault it describes, in three bands
+# whose edges are the UNCERTAINTY_LEVELS thresholds 0.45 ("visibility ahead is reduced")
+# and 0.70 ("I cannot confirm ..."), so the stated fault and the stated uncertainty move
+# together: slight (s < 0.45), moderate (0.45 <= s < 0.70), strong (s >= 0.70). The strong
+# wording is the original single phrase. Composites grade each component by its OWN
+# severity. Blackout is not graded: a black camera is black at any severity (severity
+# only sets how many cameras are affected, which the camera list already states).
+# No qualifier may contain an uncertainty_score stem ("partially", "cannot see", ...):
+# the observation must not shift the parsed uncertainty level.
 _OBSERVATION = {
-    "blackout":  "{cams} camera{s} {are} returning no image",
-    "glare":     "strong glare is saturating the {cams} camera{s}",
-    "occlusion": "the {cams} lens{es} {are} partially obstructed",
-    "blur":      "the {cams} camera{s} {are} out of focus",
-    "noise":     "very low light and heavy noise on the {cams} camera{s}",
-    "freeze":    "the {cams} camera feed{s} {are} not updating",
-    "desync":    "the {cams} camera{s} {are} out of sync with the others",
+    "blackout":  ("{cams} camera{s} {are} returning no image",) * 3,
+    "glare":     ("slight glare is affecting the {cams} camera{s}",
+                  "moderate glare is washing out the {cams} camera{s}",
+                  "strong glare is saturating the {cams} camera{s}"),
+    "occlusion": ("the {cams} lens{es} {are} slightly obstructed",
+                  "the {cams} lens{es} {are} partly obstructed",
+                  "the {cams} lens{es} {are} heavily obstructed"),
+    "blur":      ("the {cams} camera{s} {are} slightly out of focus",
+                  "the {cams} camera{s} {are} noticeably out of focus",
+                  "the {cams} camera{s} {are} badly out of focus"),
+    "noise":     ("dim light and slight noise on the {cams} camera{s}",
+                  "low light and moderate noise on the {cams} camera{s}",
+                  "very low light and heavy noise on the {cams} camera{s}"),
+    "freeze":    ("the {cams} camera feed{s} {are} briefly lagging",
+                  "the {cams} camera feed{s} {are} stalling",
+                  "the {cams} camera feed{s} {are} not updating"),
+    "desync":    ("the {cams} camera{s} {are} slightly out of sync with the others",
+                  "the {cams} camera{s} {are} noticeably out of sync with the others",
+                  "the {cams} camera{s} {are} badly out of sync with the others"),
 }
+OBSERVATION_BANDS = (0.45, 0.70)   # UNCERTAINTY_LEVELS thresholds: slight | moderate | strong
+
+
+def observation_band(severity: float) -> int:
+    """0 = slight, 1 = moderate, 2 = strong (edges: OBSERVATION_BANDS)."""
+    return sum(severity >= b for b in OBSERVATION_BANDS)
+
 
 # graded uncertainty vocabulary — the lexicon the evaluator (Metric A) scores against
 UNCERTAINTY_LEVELS = [
@@ -450,15 +478,15 @@ def target_text(spec: DegradationSpec, clean_reasoning: Optional[str] = None) ->
     if spec.severity <= 0:
         return clean_reasoning or "The road ahead is clearly visible; maintaining lane and speed."
     if spec.family == COMPOSITE:
-        obs = [_observation(c["family"], c.get("cameras") or [])
+        obs = [_observation(c["family"], c.get("cameras") or [], c["severity"])
                for c in spec.components if c.get("severity", 0) > 0 and c["family"] != "clean"]
         obs = "; ".join([obs[0]] + [o[0].lower() + o[1:] for o in obs[1:]])
     else:
-        obs = _observation(spec.family, spec.cameras or [])
+        obs = _observation(spec.family, spec.cameras or [], spec.severity)
     return f"{obs}; {_level(UNCERTAINTY_LEVELS, spec.severity)}. {_level(_ACTION, spec.severity).capitalize()}."
 
 
-def _observation(family: str, cams: list[int]) -> str:
+def _observation(family: str, cams: list[int], severity: float) -> str:
     names = [_CAM_NAMES.get(c, f"camera {c}") for c in cams]
     if len(names) == 0 or len(names) >= 5:
         cam_str, plural = "all", True
@@ -466,7 +494,7 @@ def _observation(family: str, cams: list[int]) -> str:
         cam_str, plural = names[0], False
     else:
         cam_str, plural = ", ".join(names[:-1]) + " and " + names[-1], True
-    obs = _OBSERVATION[family].format(
+    obs = _OBSERVATION[family][observation_band(severity)].format(
         cams=cam_str, s="s" if plural else "", es="es" if plural else "",
         are="are" if plural else "is")
     if cam_str == "all":                      # "the all cameras" -> "all cameras"
