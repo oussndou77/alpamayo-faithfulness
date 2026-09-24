@@ -143,13 +143,11 @@ def test_composite_reaching_stop_severity():
     assert "I have no usable visual input and cannot assess the scene" in text, text
     assert "controlled stop" in text
     assert uncertainty_score(text) == UNCERTAINTY_LEVELS[-1][0]
-    # the target trajectory decelerates throughout and travels less than just below the
-    # stop level; it reaches zero speed only at s = 1 (see test_target_trajectory_*)
+    # the target trajectory is the controlled-stop policy: progress decays to zero
     xy = np.stack([np.arange(1, 21) * 1.0, np.zeros(20)], 1)
     tgt = target_trajectory(xy, spec.severity)
     steps = np.diff(tgt[:, 0], prepend=0.0)
-    assert (np.diff(steps) < 0).all()
-    assert tgt[-1, 0] < target_trajectory(xy, 0.936)[-1, 0]
+    assert abs(steps[-1]) < 1e-9 and (np.diff(steps) <= 1e-9).all()
 
 
 def _target_trajectory_main(xy_true, severity, alpha=ALPHA_SPEED, beta=BETA_LATERAL):
@@ -199,6 +197,34 @@ def test_target_trajectory_stops_at_full_severity():
         assert abs(steps[-1]) < 1e-12, "s = 1 must end at zero speed"
         assert (steps >= 0).all() and tgt[-1, 0] > 0
         assert np.allclose(tgt[:, 1], xy[:, 1] * (1 - BETA_LATERAL))  # lateral policy unchanged
+
+
+def test_target_trajectory_stops_for_every_stop_severity():
+    """Final speed is exactly zero for every s >= STOP_SEVERITY, and never below it."""
+    above = np.round(np.linspace(STOP_SEVERITY, 1.0, 51), 6)
+    below = np.round(np.linspace(0.05, STOP_SEVERITY, 90, endpoint=False), 6)
+    for seed in range(5):
+        xy = _realistic_future(seed)
+        for s in above:
+            steps = np.diff(target_trajectory(xy, s)[:, 0], prepend=0.0)
+            assert steps[-1] == 0.0, (seed, s, steps[-1])
+        for s in below:
+            steps = np.diff(target_trajectory(xy, s)[:, 0], prepend=0.0)
+            assert steps[-1] > 1e-6, (seed, s, steps[-1])
+
+
+def test_text_and_trajectory_targets_agree_on_stopping():
+    """The harness audits text vs action: the targets themselves must never disagree.
+    "controlled stop" appears in target_text exactly when target_trajectory ends at rest."""
+    f = _frames()
+    xy = _realistic_future(0)
+    for s in np.round(np.linspace(0.05, 1.0, 96), 6):
+        for spec in (DegradationSpec("blur", float(s), [1], seed=3),
+                     compose(("glare", float(s), [1]), ("noise", 0.0, [2]), seed=3)):
+            _, spec = apply_degradation(f, spec)
+            says_stop = "controlled stop" in target_text(spec)
+            steps = np.diff(target_trajectory(xy, spec.severity)[:, 0], prepend=0.0)
+            assert says_stop == (steps[-1] == 0.0), (s, spec.severity, says_stop, steps[-1])
 
 
 def test_target_trajectory_unchanged_below_blend():

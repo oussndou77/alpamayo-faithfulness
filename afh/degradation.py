@@ -474,7 +474,8 @@ def _observation(family: str, cams: list[int]) -> str:
 
 def target_trajectory(xy_true: np.ndarray, severity: float,
                       alpha: float = ALPHA_SPEED, beta: float = BETA_LATERAL,
-                      dt: float = 0.1, s0: float = BLEND_SEVERITY) -> np.ndarray:
+                      dt: float = 0.1, s0: float = BLEND_SEVERITY,
+                      s_stop: float = STOP_SEVERITY) -> np.ndarray:
     """
     Conservative damping of the TRUE future (T, 2) in the rig frame (x forward, y left).
 
@@ -484,12 +485,16 @@ def target_trajectory(xy_true: np.ndarray, severity: float,
                linear deceleration ramp, continuously in s:
 
                    steps * (1 - alpha * s) * ((1 - w) + w * ramp)
-                   w = (s - s0) / (1 - s0),   ramp = linspace(1, 0, T)
+                   w = min(1, (s - s0) / (STOP_SEVERITY - s0)),   ramp = linspace(1, 0, T)
 
-               w = 0 at s0 (no jump), w = 1 at s = 1 (increments reach zero: full stop).
-               Forward progress is therefore strictly decreasing in s over [0, 1]; the
-               previous hard switch at STOP_SEVERITY travelled FURTHER than the damped
-               target just below it. Below s0 the target is unchanged.
+               w = 0 at s0 (no jump). w reaches 1 at STOP_SEVERITY, the same threshold at
+               which target_text announces "decelerating to a controlled stop": for every
+               s >= STOP_SEVERITY the final increment is exactly zero, and below it the
+               target never comes to rest. Text and trajectory targets therefore never
+               disagree on whether the car stops. Forward progress is strictly decreasing
+               in s over [0, 1] (between STOP_SEVERITY and 1 through the (1 - alpha * s)
+               factor). The previous hard switch at STOP_SEVERITY travelled FURTHER than
+               the damped target just below it. Below s0 the target is unchanged.
 
     This is a POLICY, not ground truth. Document alpha/beta/s0 as choices.
     """
@@ -502,7 +507,7 @@ def target_trajectory(xy_true: np.ndarray, severity: float,
     lat = xy[:, 1]
     steps = steps * (1.0 - alpha * s)
     if s > s0:
-        w = (s - s0) / (1.0 - s0)
+        w = min(1.0, (s - s0) / (s_stop - s0))
         ramp = np.linspace(1.0, 0.0, T)
         steps = steps * ((1.0 - w) + w * ramp)
     x_new = np.cumsum(steps)
