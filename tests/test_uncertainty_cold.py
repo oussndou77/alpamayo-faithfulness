@@ -227,6 +227,29 @@ def test_text_and_trajectory_targets_agree_on_stopping():
             assert says_stop == (steps[-1] == 0.0), (s, spec.severity, says_stop, steps[-1])
 
 
+def test_text_does_not_claim_constant_speed_when_trajectory_slows():
+    """For every s > 0: if the trajectory target is slower than the true future, the text
+    target must not say "maintaining lane and speed"."""
+    f = _frames()
+    grid = np.round(np.concatenate([np.linspace(0.001, 0.2, 40), np.linspace(0.2, 1.0, 81)]), 6)
+    for seed in range(3):
+        xy = _realistic_future(seed)
+        for s in grid:
+            for spec in (DegradationSpec(FAMILIES[int(s * 1000) % len(FAMILIES)], float(s), [1],
+                                         seed=seed),
+                         compose(("glare", float(s), [1]), ("blur", 0.0, [0]), seed=seed)):
+                _, spec = apply_degradation(f, spec)
+                slower = target_trajectory(xy, spec.severity)[-1, 0] < xy[-1, 0]
+                text = target_text(spec).lower()
+                assert slower, (s, "every degraded target is slower than the true future")
+                assert "maintaining lane and speed" not in text, (s, text)
+                assert "reducing speed" in text or "slowing" in text or "decelerating" in text, text
+    # clean input keeps the model's own wording / the constant-speed default
+    clean = DegradationSpec("clean", 0.0)
+    assert "maintaining lane and speed" in target_text(clean)
+    np.testing.assert_array_equal(target_trajectory(_realistic_future(0), 0.0), _realistic_future(0))
+
+
 def test_target_trajectory_unchanged_below_blend():
     grid = [s for s in np.round(np.linspace(0.0, 1.0, 201), 6) if s <= BLEND_SEVERITY]
     grid += [0.15, 0.333, 0.45, 0.6999]

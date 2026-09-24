@@ -280,7 +280,10 @@ complete and runs cold; training is the next step.
   the target travels strictly decreases as severity rises, with no jump. Because this
   harness audits whether what the model *says* matches what it *does*, the training
   targets must pass the same check. The text target announces a controlled stop exactly
-  when the trajectory target ends at rest (s ≥ 0.95), and a cold test enforces this.
+  when the trajectory target ends at rest (s ≥ 0.95). Whenever the trajectory target is
+  slower than the true future (every s > 0), the text announces a slowdown and never
+  « maintaining lane and speed », which is reserved for clean input. Cold tests enforce
+  both properties.
 - **`afh/uncertainty_dataset.py`** — the "dataset" is a JSONL manifest of a few hundred
   bytes per example (clip, spec, targets); frames are re-loaded and re-degraded at
   training time, so nothing heavy is stored and every example is reproducible. ~40% clean

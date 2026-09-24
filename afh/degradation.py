@@ -422,9 +422,11 @@ UNCERTAINTY_LEVELS = [
     (0.95, "I have no usable visual input and cannot assess the scene"),
 ]
 
+# Degraded targets only (s > 0): target_trajectory damps speed by (1 - ALPHA * s) from any
+# s > 0, so the mildest action must already describe a slowdown. "maintaining lane and
+# speed" is reserved for clean input (s = 0), where the trajectory target is the true one.
 _ACTION = [
-    (0.00, "maintaining lane and speed"),
-    (0.20, "maintaining lane, slightly reducing speed"),
+    (0.00, "maintaining lane, slightly reducing speed"),
     (0.45, "reducing speed and increasing lateral margin"),
     (0.70, "slowing down significantly and holding the lane center"),
     (STOP_SEVERITY, "decelerating to a controlled stop within the current lane"),
