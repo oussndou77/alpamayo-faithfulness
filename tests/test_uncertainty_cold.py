@@ -370,7 +370,7 @@ def test_losing_all_forward_or_all_cameras_escalates():
     for s in (0.05, 0.3, 0.6):
         _, both = apply_degradation(f, DegradationSpec("blackout", s, [1, 6], seed=0))
         assert _level_of(both) >= 0.70 and "cannot confirm" in target_text(both), target_text(both)
-        # every camera black: the issue #9 scenario must say so and stop
+        # every camera black: the NVlabs/alpamayo2#9 scenario must say so and stop
         _, total = apply_degradation(f, DegradationSpec("blackout", s, list(range(7)), seed=0))
         text = target_text(total)
         assert "no usable visual input" in text and "controlled stop" in text, text
@@ -577,6 +577,37 @@ def test_end_to_end_split_to_eval_on_fixtures():
     beh = rep["behavior"]["slices"]["all_degraded"]
     assert beh["ade_delta_vs_clean"] > 0
     assert format_report(rep)
+
+
+def test_eval_reference_uses_target_severity():
+    """The severity reference in the calibration report uses the same camera-aware notion
+    of gravity as the training targets (target_severity), not the raw spec.severity."""
+    f = _frames()
+    gt = np.stack([np.arange(1, 21) * 1.0, np.zeros(20)], 1)
+    _, front = apply_degradation(f, DegradationSpec("blackout", 0.15, [1], seed=0))  # -> 0.45
+    _, blur = apply_degradation(f, DegradationSpec("blur", 0.30, [1], seed=0))       # -> 0.30
+    recs = []
+    for i in range(6):
+        recs.append({"clip_id": f"c{i}", "family": "clean", "severity": 0.0, "text": "",
+                     "gt_xy": gt.tolist(), "pred_xy": (gt + [0, 0.2 + 0.15 * i]).tolist()})
+        recs.append({"clip_id": f"c{i}", "spec": front.to_dict(), "text": "",   # high error
+                     "gt_xy": gt.tolist(), "pred_xy": (gt + [0, 3.0]).tolist()})
+        recs.append({"clip_id": f"c{i}", "spec": blur.to_dict(), "text": "",    # low error
+                     "gt_xy": gt.tolist(), "pred_xy": (gt + [0, 0.3]).tolist()})
+    rep = evaluate(recs, baseline=recs)
+    cal = rep["calibration"]["slices"]["all_degraded"]
+    assert cal["n_high_error"] == 6, cal
+    # raw severity ranks the front blackout (0.15) BELOW the blur (0.30): AUROC 0.0;
+    # the target severity (0.45 vs 0.30) ranks it above: AUROC 1.0
+    assert cal["auroc_severity_high_error"] == 1.0, cal
+    # a manifest-style "target_severity" field is honoured as well
+    recs2 = [dict(r, target_severity=(0.45 if r.get("spec", {}).get("family") == "blackout"
+                                      else r.get("severity", 0.3))) for r in recs]
+    assert evaluate(recs2)["calibration"]["slices"]["all_degraded"][
+        "auroc_severity_high_error"] == 1.0
+    # pairing with the baseline still uses the raw condition key: every record pairs
+    beh = rep["behavior"]["slices"]["all_degraded"]
+    assert beh["n_paired_baseline"] == 12 and beh["ade_delta_vs_baseline"] == 0.0
 
 
 def _run_all():

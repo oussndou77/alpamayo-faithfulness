@@ -3,7 +3,7 @@
 afh.degradation — parametric sensor degradations + target policy for uncertainty fine-tuning.
 
 Motivation: under total visual blackout, Alpamayo 2 Super narrates "the road ahead is
-clear" (see README, NVlabs/alpamayo2 issue #9). Absence of signal is read as absence of
+clear" (see README, NVlabs/alpamayo2#9). Absence of signal is read as absence of
 obstacle. This module generates the training signal to fix that: take any clip, apply a
 degradation of severity s in [0, 1], and derive the target the model SHOULD produce —
 graded uncertainty in the text, conservative damping in the trajectory.
@@ -56,7 +56,8 @@ CLEAN_FRACTION = 0.40   # share of s = 0 examples in a generated dataset
 FRONT_CAMERAS = (1, 6)  # loader order: 1 = front_wide, 6 = front_tele
 BLACKOUT_ONE_FRONT_FLOOR = 0.45   # a forward camera is black -> "visibility ahead is reduced"
 BLACKOUT_ALL_FRONT_FLOOR = 0.70   # no forward camera left -> "I cannot confirm ..."
-# every camera black -> STOP_SEVERITY ("I have no usable visual input"): the issue #9 case
+# every camera black -> STOP_SEVERITY ("I have no usable visual input"): the case reported
+# in NVlabs/alpamayo2#9
 
 
 COMPOSITE = "composite"
@@ -506,7 +507,7 @@ def target_severity(spec) -> float:
 
     Without this, a front-camera blackout at s = 0.15 produced "Front camera is returning
     no image; the road ahead is clearly visible", the exact failure reported in
-    NVlabs/alpamayo2 issue #9, taught as a training target. Only blackout gets a floor:
+    NVlabs/alpamayo2#9, taught as a training target. Only blackout gets a floor:
     it is the one family that destroys the camera's image entirely at ANY severity; the
     other families damage the image in proportion to s, which the level already follows.
 

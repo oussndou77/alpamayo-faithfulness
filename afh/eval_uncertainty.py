@@ -3,7 +3,7 @@
 afh.eval_uncertainty — held-out evaluation of the uncertainty fine-tune, on two
 INDEPENDENT axes plus a clean-input non-regression report.
 
-Why two axes (NVlabs/alpamayo2 issue #9): cautious vocabulary or a damped trajectory do not
+Why two axes (NVlabs/alpamayo2#9): cautious vocabulary or a damped trajectory do not
 by themselves show safer behavior. A model can learn to *say* "I cannot confirm the road is
 clear" on every degraded frame while its plan is no better, or learn to crawl along while
 its words stay confident. So the two are scored separately and never merged into one number.
@@ -14,7 +14,9 @@ its words stay confident. So the two are scored separately and never merged into
        * AUROC of uncertainty_score for detecting high-error cases (ADE above a threshold,
          by default the 90th percentile of the same model's ADE on CLEAN input, i.e. "worse
          than it usually is when it can see");
-       * reference: the same AUROC using the true degradation SEVERITY as the score. The
+       * reference: the same AUROC using the TARGET severity as the score
+         (afh.degradation.target_severity: camera-aware, e.g. a black front camera counts
+         at least 0.45), i.e. the same notion of gravity the training targets use. The
          model sees the frames, not the severity label; if its words detect high error
          no better than the label does, it is echoing the degradation, not its own risk.
      Expressed uncertainty comes from afh.degradation.uncertainty_score (graded lexicon).
@@ -43,6 +45,8 @@ Every report is broken down by slice: in-distribution, held-out family, held-out
 Input: JSONL, one line per (clip, condition) inference result:
     {"clip_id": str,
      "spec": {...} | "family"/"combo" + "severity",   # s = 0 / "clean" = clean input
+     "target_severity": float,                         # optional (manifest field); else
+                                                       # derived from "spec", else "severity"
      "text": str | "uncertainty_score": float,        # model reasoning, or pre-scored
      "pred_xy": [[x, y], ...] | [[[x, y], ...], ...],  # one trajectory or K rollouts
      "gt_xy":  [[x, y], ...],                          # TRUE future (not target_xy)
@@ -63,7 +67,7 @@ from typing import Callable, Iterable, Optional
 
 import numpy as np
 
-from afh.degradation import combo_key, uncertainty_score
+from afh.degradation import combo_key, target_severity, uncertainty_score
 
 FALSE_ALARM_LEVEL = 0.45    # >= "visibility ahead is reduced": an alarm on clean input
 HIGH_ERROR_QUANTILE = 0.90  # high error := ADE above this quantile of clean-input ADE
@@ -156,6 +160,15 @@ def _severity(r: dict) -> float:
     return float((r.get("spec") or {}).get("severity", 0.0))
 
 
+def _target_severity(r: dict) -> float:
+    """Severity the targets were built from (camera-aware); raw severity as a fallback."""
+    if r.get("target_severity") is not None:
+        return float(r["target_severity"])
+    if r.get("spec"):
+        return float(target_severity(r["spec"]))
+    return _severity(r)
+
+
 def _combo(r: dict) -> str:
     if r.get("combo"):
         return r["combo"]
@@ -184,7 +197,11 @@ def prepare(records: Iterable[dict]) -> list[dict]:
         combo = _combo(r)
         clean = combo == "clean"
         out.append({
-            "clip_id": r["clip_id"], "combo": combo, "severity": 0.0 if clean else _severity(r),
+            "clip_id": r["clip_id"], "combo": combo,
+            # target severity: the gravity notion shared with the training targets; the raw
+            # value is kept for reference, and still drives the pairing key (_cond_key)
+            "severity": 0.0 if clean else _target_severity(r),
+            "raw_severity": 0.0 if clean else _severity(r),
             "clean": clean, "cond": _cond_key(r),
             "uncertainty": float(u) if scored else 0.0, "scored": bool(scored),
             "heldout_family": bool(r.get("heldout_family", False)),

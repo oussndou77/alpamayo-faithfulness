@@ -290,7 +290,7 @@ complete and runs cold; training is the next step.
   only how many. A black forward camera (front_wide or front_tele) raises the target to at
   least « visibility ahead is reduced », losing both forward cameras raises it to at least
   « I cannot confirm the road ahead is clear », and losing every camera means « no usable
-  visual input » and a controlled stop. So no target ever teaches the issue #9 failure
+  visual input » and a controlled stop. So no target ever teaches the [NVlabs/alpamayo2#9](https://github.com/NVlabs/alpamayo2/issues/9) failure
   (a blind front camera narrated as « the road ahead is clearly visible »). Cold tests
   enforce all of these properties.
 - **`afh/uncertainty_dataset.py`** — the "dataset" is a JSONL manifest of a few hundred
@@ -308,7 +308,7 @@ complete and runs cold; training is the next step.
 
 ### Held-out evaluation protocol
 
-This follows NVIDIA's request in NVlabs/alpamayo2 issue #9: test on held-out scenes and
+This follows NVIDIA's request in [NVlabs/alpamayo2#9](https://github.com/NVlabs/alpamayo2/issues/9): test on held-out scenes and
 unseen degradation combinations, check that clean-input performance holds, and score
 uncertainty reporting separately from trajectory changes.
 
