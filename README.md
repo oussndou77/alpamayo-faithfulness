@@ -282,8 +282,11 @@ complete and runs cold; training is the next step.
   targets must pass the same check. The text target announces a controlled stop exactly
   when the trajectory target ends at rest (s ≥ 0.95). Whenever the trajectory target is
   slower than the true future (every s > 0), the text announces a slowdown and never
-  « maintaining lane and speed », which is reserved for clean input. Cold tests enforce
-  both properties.
+  « maintaining lane and speed », which is reserved for clean input. The observation
+  itself is graded by the fault's own severity (slight / moderate / strong, bands at the
+  0.45 and 0.70 uncertainty thresholds, per component in a composite), so a mild glare is
+  never described as « strong glare is saturating » the camera. Its wording never shifts
+  the parsed uncertainty level. Cold tests enforce all of these properties.
 - **`afh/uncertainty_dataset.py`** — the "dataset" is a JSONL manifest of a few hundred
   bytes per example (clip, spec, targets); frames are re-loaded and re-degraded at
   training time, so nothing heavy is stored and every example is reproducible. ~40% clean

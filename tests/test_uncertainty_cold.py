@@ -260,6 +260,70 @@ def test_target_trajectory_unchanged_below_blend():
                                           _target_trajectory_main(xy, s), err_msg=f"s={s}")
 
 
+_OBS_GRID = np.round(np.linspace(0.01, 1.0, 100), 6)
+_GRADED = [f for f in FAMILIES if f != "blackout"]
+
+
+def _obs(text):
+    """Observation part of a single-family target text (before the uncertainty clause)."""
+    return text.split(";")[0].lower()
+
+
+def test_observation_graded_by_severity():
+    """Every graded family uses more than one wording, never de-escalates along severity,
+    and the bands sit on UNCERTAINTY_LEVELS thresholds."""
+    thresholds = {thr for thr, _ in UNCERTAINTY_LEVELS}
+    from afh.degradation import OBSERVATION_BANDS, observation_band
+    assert set(OBSERVATION_BANDS) <= thresholds
+    for fam in _GRADED:
+        texts = [_obs(target_text(DegradationSpec(fam, float(s), [1]))) for s in _OBS_GRID]
+        order = list(dict.fromkeys(texts))              # distinct wordings, in grid order
+        assert len(order) == 3, (fam, order)
+        ranks = [order.index(t) for t in texts]
+        assert ranks == sorted(ranks), (fam, "wording must not de-escalate")
+        bands = [observation_band(float(s)) for s in _OBS_GRID]
+        assert ranks == bands, (fam, "wording changes exactly at the band edges")
+    # blackout is deliberately ungraded: a black camera is black at any severity
+    assert len({_obs(target_text(DegradationSpec("blackout", float(s), [1])))
+                for s in _OBS_GRID}) == 1
+
+
+def test_observation_wording_matches_intensity():
+    strong = ("strong", "saturating", "heavy", "heavily", "very low", "not updating", "badly")
+    for fam in _GRADED:
+        low = _obs(target_text(DegradationSpec(fam, 0.15, [1])))
+        assert not any(w in low for w in strong), (fam, low)
+        high = _obs(target_text(DegradationSpec(fam, 0.8, [1])))
+        assert any(w in high for w in strong), (fam, high)
+    assert "returning no image" in _obs(target_text(DegradationSpec("blackout", 0.15, [1])))
+
+
+def test_composite_observation_uses_component_severity():
+    spec = compose(("glare", 0.2, [1]), ("blur", 0.9, [0]), seed=0)
+    _, spec = apply_degradation(_frames(), spec)
+    assert spec.severity > 0.9                          # combined noisy-OR is severe ...
+    text = target_text(spec).lower()
+    assert "slight glare" in text and "strong glare" not in text, text   # ... glare is not
+    assert "badly out of focus" in text, text
+    assert "cannot confirm" in text                     # uncertainty follows the combined s
+
+
+def test_observation_never_shifts_parsed_uncertainty():
+    """uncertainty_score of a target equals the level intended for its severity: the
+    observation words must not match an uncertainty stem (old occlusion text said
+    "partially obstructed", which parsed as 0.45 even at s = 0.15)."""
+    def intended(s):
+        return max(thr for thr, _ in UNCERTAINTY_LEVELS if s >= thr)
+    for fam in FAMILIES:
+        for s in _OBS_GRID:
+            spec = DegradationSpec(fam, float(s), [1])
+            assert uncertainty_score(target_text(spec)) == intended(s), (fam, s, target_text(spec))
+    for s in _OBS_GRID:
+        spec = compose(("occlusion", float(s), [1]), ("desync", float(s), [0]), seed=0)
+        _, spec = apply_degradation(_frames(), spec)
+        assert uncertainty_score(target_text(spec)) == intended(spec.severity), target_text(spec)
+
+
 # --------------------------------------------------------------------------- split
 
 def test_split_clips_disjoint_and_deterministic():
