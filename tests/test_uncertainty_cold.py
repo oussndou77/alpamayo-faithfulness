@@ -19,7 +19,7 @@ import numpy as np
 
 from afh.degradation import (
     ALPHA_SPEED, BETA_LATERAL, BLEND_SEVERITY, DegradationSpec, FAMILIES, STOP_SEVERITY,
-    UNCERTAINTY_LEVELS, apply_degradation,
+    UNCERTAINTY_LEVELS, apply_degradation, target_severity,
     combo_key, compose, sample_composite_spec, target_text, target_trajectory,
     uncertainty_score,
 )
@@ -220,10 +220,12 @@ def test_text_and_trajectory_targets_agree_on_stopping():
     xy = _realistic_future(0)
     for s in np.round(np.linspace(0.05, 1.0, 96), 6):
         for spec in (DegradationSpec("blur", float(s), [1], seed=3),
-                     compose(("glare", float(s), [1]), ("noise", 0.0, [2]), seed=3)):
+                     compose(("glare", float(s), [1]), ("noise", 0.0, [2]), seed=3),
+                     DegradationSpec("blackout", float(s), [1, 6], seed=3),
+                     DegradationSpec("blackout", float(s), list(range(7)), seed=3)):
             _, spec = apply_degradation(f, spec)
             says_stop = "controlled stop" in target_text(spec)
-            steps = np.diff(target_trajectory(xy, spec.severity)[:, 0], prepend=0.0)
+            steps = np.diff(target_trajectory(xy, target_severity(spec))[:, 0], prepend=0.0)
             assert says_stop == (steps[-1] == 0.0), (s, spec.severity, says_stop, steps[-1])
 
 
@@ -239,7 +241,7 @@ def test_text_does_not_claim_constant_speed_when_trajectory_slows():
                                          seed=seed),
                          compose(("glare", float(s), [1]), ("blur", 0.0, [0]), seed=seed)):
                 _, spec = apply_degradation(f, spec)
-                slower = target_trajectory(xy, spec.severity)[-1, 0] < xy[-1, 0]
+                slower = target_trajectory(xy, target_severity(spec))[-1, 0] < xy[-1, 0]
                 text = target_text(spec).lower()
                 assert slower, (s, "every degraded target is slower than the true future")
                 assert "maintaining lane and speed" not in text, (s, text)
@@ -316,12 +318,77 @@ def test_observation_never_shifts_parsed_uncertainty():
         return max(thr for thr, _ in UNCERTAINTY_LEVELS if s >= thr)
     for fam in FAMILIES:
         for s in _OBS_GRID:
-            spec = DegradationSpec(fam, float(s), [1])
-            assert uncertainty_score(target_text(spec)) == intended(s), (fam, s, target_text(spec))
+            _, spec = apply_degradation(_frames(), DegradationSpec(fam, float(s), [1]))
+            want = intended(target_severity(spec))   # camera-aware (front blackout floor)
+            assert uncertainty_score(target_text(spec)) == want, (fam, s, target_text(spec))
     for s in _OBS_GRID:
         spec = compose(("occlusion", float(s), [1]), ("desync", float(s), [0]), seed=0)
         _, spec = apply_degradation(_frames(), spec)
-        assert uncertainty_score(target_text(spec)) == intended(spec.severity), target_text(spec)
+        assert uncertainty_score(target_text(spec)) == intended(target_severity(spec)), \
+            target_text(spec)
+
+
+def _level_of(spec):
+    return uncertainty_score(target_text(spec))
+
+
+def test_front_blackout_never_clearly_visible():
+    """If a front camera (front_wide or front_tele) is entirely black, the target never
+    says "clearly visible" and voices at least "visibility ahead is reduced" (0.45) - alone
+    or inside a composite, at any severity."""
+    f = _frames()
+    for s in _OBS_GRID:
+        for cams in ([1], [6], [1, 4], [6, 3, 5]):
+            _, spec = apply_degradation(f, DegradationSpec("blackout", float(s), cams, seed=0))
+            text = target_text(spec)
+            assert "clearly visible" not in text and _level_of(spec) >= 0.45, (s, cams, text)
+        _, comp = apply_degradation(f, compose(("blackout", float(s), [1]), ("blur", 0.1, [4]),
+                                               seed=0))
+        assert "clearly visible" not in target_text(comp) and _level_of(comp) >= 0.45, \
+            target_text(comp)
+
+
+def test_front_camera_loss_weighs_more_than_rear():
+    """Same severity, same number of cameras: losing a front camera voices more uncertainty
+    than losing a rear one. Rear-only blackouts and the other families keep their level
+    (guard: those parts of the policy are unchanged)."""
+    f = _frames()
+    def intended(s):
+        return max(thr for thr, _ in UNCERTAINTY_LEVELS if s >= thr)
+    for s in _OBS_GRID[_OBS_GRID < 0.45]:
+        _, front = apply_degradation(f, DegradationSpec("blackout", float(s), [1], seed=0))
+        _, rear = apply_degradation(f, DegradationSpec("blackout", float(s), [4], seed=0))
+        assert _level_of(front) > _level_of(rear), (s, target_text(front), target_text(rear))
+        assert _level_of(rear) == intended(s), target_text(rear)
+        for fam in _GRADED:          # no floor for families whose damage scales with s
+            _, other = apply_degradation(f, DegradationSpec(fam, float(s), [1], seed=0))
+            assert _level_of(other) == intended(s), (fam, s, target_text(other))
+
+
+def test_losing_all_forward_or_all_cameras_escalates():
+    f = _frames()
+    for s in (0.05, 0.3, 0.6):
+        _, both = apply_degradation(f, DegradationSpec("blackout", s, [1, 6], seed=0))
+        assert _level_of(both) >= 0.70 and "cannot confirm" in target_text(both), target_text(both)
+        # every camera black: the issue #9 scenario must say so and stop
+        _, total = apply_degradation(f, DegradationSpec("blackout", s, list(range(7)), seed=0))
+        text = target_text(total)
+        assert "no usable visual input" in text and "controlled stop" in text, text
+
+
+def test_manifest_targets_use_camera_aware_severity():
+    """The trajectory target in the manifest follows the same camera-aware severity as the
+    text target: a front blackout at s = 0.15 is damped like s = 0.45, a rear one is not."""
+    xy = _realistic_future(0).tolist()
+    cache = {"c": {"t0_us": 0, "clean_reasoning": "ok", "future_xy": xy}}
+    m = build_manifest(cache, n_per_clip=0, seed=0, extra_specs=[
+        DegradationSpec("blackout", 0.15, [1]), DegradationSpec("blackout", 0.15, [4])])
+    front, rear = m
+    np.testing.assert_allclose(front["target_xy"],
+                               target_trajectory(np.asarray(xy), 0.45).round(3), atol=1e-9)
+    np.testing.assert_allclose(rear["target_xy"],
+                               target_trajectory(np.asarray(xy), 0.15).round(3), atol=1e-9)
+    assert "visibility ahead is reduced" in front["target_text"]
 
 
 # --------------------------------------------------------------------------- split

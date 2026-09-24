@@ -53,7 +53,7 @@ import numpy as np
 
 from afh.degradation import (
     DegradationSpec, apply_degradation, sample_spec, sample_composite_spec, compose,
-    target_text, target_trajectory, combo_key, spec_families, normalize_combo,
+    target_text, target_trajectory, target_severity, combo_key, spec_families, normalize_combo,
     CLEAN_FRACTION, FAMILIES,
 )
 
@@ -139,14 +139,15 @@ def build_manifest(clean_cache: dict, n_per_clip: int = 16, seed: int = 0,
             # resolve cameras/params deterministically (same seed => same choice on real frames)
             _, spec = apply_degradation(dummy, spec)
             text = target_text(spec, clean_reasoning=info.get("clean_reasoning"))
-            traj = (target_trajectory(xy_true, spec.severity).round(3).tolist()
+            ts = target_severity(spec)   # camera-aware: a lost front camera weighs more
+            traj = (target_trajectory(xy_true, ts).round(3).tolist()
                     if xy_true.size else None)
             out.append({
                 "clip_id": cid, "t0_us": info.get("t0_us", 5_100_000),
                 "spec": asdict(spec),
                 "target_text": text,
                 "target_xy": traj,
-                "severity": spec.severity, "family": spec.family,
+                "severity": spec.severity, "target_severity": ts, "family": spec.family,
                 "combo": combo_key(spec),
             })
     return out
