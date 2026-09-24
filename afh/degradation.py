@@ -19,6 +19,12 @@ Seven families (all deterministic given a seed, all severity-parametric):
     freeze     — frames repeated (frozen sensor, frame drop)
     desync     — temporal offset injected across cameras (clock drift)
 
+Composite degradations (family = "composite") chain several single-family components,
+optionally pinned to different cameras (e.g. glare on the front camera + blur on a side
+camera). Build them with `compose(...)` or `sample_composite_spec(...)`. Each component
+gets its own seed derived from the parent seed and its index, so a composite is exactly
+reproducible from (components, seed). Single-family specs are unchanged.
+
 Frames are numpy uint8 arrays of shape (n_cam, n_t, 3, H, W) — convert torch tensors with
 `.cpu().numpy()` before, and back with `torch.from_numpy` after.
 
@@ -46,16 +52,92 @@ STOP_SEVERITY = 0.95    # at/above this, target is a controlled stop
 CLEAN_FRACTION = 0.40   # share of s = 0 examples in a generated dataset
 
 
+COMPOSITE = "composite"
+
+
 @dataclass
 class DegradationSpec:
-    family: str                       # one of FAMILIES, or "clean"
-    severity: float                   # 0..1
+    family: str                       # one of FAMILIES, "clean", or COMPOSITE
+    severity: float                   # 0..1 (composite: max over components, see compose)
     cameras: list[int] = field(default_factory=list)  # tensor indices affected
     seed: int = 0
     params: dict = field(default_factory=dict)        # family-specific, filled by apply
+    # composite only: list of single-family spec dicts (family, severity, cameras, seed,
+    # params), applied in order. Kept as plain dicts so the spec stays JSON-serialisable.
+    components: list[dict] = field(default_factory=list)
 
     def to_dict(self):
         return asdict(self)
+
+    @property
+    def is_composite(self) -> bool:
+        return self.family == COMPOSITE
+
+    def combo(self) -> str:
+        """Order-independent family key: "clean", "blur", "blur+glare", ..."""
+        return combo_key(self)
+
+
+def combo_key(spec) -> str:
+    """
+    Family-set key of a spec (DegradationSpec or its dict form): sorted, "+"-joined, with
+    zero-severity components dropped. Cameras are deliberately NOT part of the key: a
+    held-out combination means "this set of families never co-occurs in training".
+    """
+    d = spec.to_dict() if isinstance(spec, DegradationSpec) else spec
+    if d["family"] == COMPOSITE:
+        fams = sorted({c["family"] for c in d.get("components", [])
+                       if c.get("severity", 0) > 0 and c["family"] != "clean"})
+        return "+".join(fams) if fams else "clean"
+    if d["family"] == "clean" or d.get("severity", 0) <= 0:
+        return "clean"
+    return d["family"]
+
+
+def spec_families(spec) -> set[str]:
+    """Set of degradation families present in a spec (empty for clean)."""
+    k = combo_key(spec)
+    return set() if k == "clean" else set(k.split("+"))
+
+
+def _component_seed(parent_seed: int, index: int) -> int:
+    """Deterministic, well-mixed child seed (no Python hash(): it is salted per process)."""
+    return int(np.random.SeedSequence([int(parent_seed), int(index)]).generate_state(1)[0])
+
+
+def compose(*components, seed: int = 0) -> DegradationSpec:
+    """
+    Build a composite spec from single-family components, given as DegradationSpec or
+    dicts with at least family/severity (cameras optional: pin them to put each family on a
+    different camera, e.g. compose(("glare", .8, [1]), ("blur", .5, [0]))). Tuples
+    (family, severity[, cameras]) are accepted as shorthand.
+
+    Component seeds that are not given explicitly are derived from `seed` and the index.
+    Composite severity = max component severity: a POLICY choice (the worst fault drives
+    the stated uncertainty; faults are not summed), documented like ALPHA/BETA.
+    """
+    comps = []
+    for i, c in enumerate(components):
+        if isinstance(c, DegradationSpec):
+            d = c.to_dict()
+            d.pop("components", None)
+        elif isinstance(c, dict):
+            d = {"cameras": [], "params": {}, "seed": None, **c}
+        else:
+            fam, sev, *rest = c
+            d = {"family": fam, "severity": sev, "cameras": list(rest[0]) if rest else [],
+                 "params": {}, "seed": None}
+        if d["family"] == COMPOSITE:
+            raise ValueError("nested composites are not supported")
+        if d["family"] != "clean" and d["family"] not in FAMILIES:
+            raise ValueError(f"unknown family {d['family']!r}; choose from {FAMILIES}")
+        d["severity"] = float(np.clip(d["severity"], 0.0, 1.0))
+        if d.get("seed") is None:        # DegradationSpec keeps its seed; dict may set one
+            d["seed"] = _component_seed(seed, i)
+        d["cameras"] = list(d.get("cameras") or [])
+        comps.append(d)
+    sev = max((c["severity"] for c in comps), default=0.0)
+    return DegradationSpec(family=COMPOSITE, severity=sev, seed=seed, components=comps)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -218,9 +300,38 @@ _APPLY = {
 }
 
 
+def _apply_composite(frames, spec):
+    """Apply components in order; each sees the output of the previous one."""
+    out = frames
+    cams, resolved = set(), []
+    for i, comp in enumerate(spec.components):
+        sub = DegradationSpec(family=comp["family"], severity=comp["severity"],
+                              cameras=list(comp.get("cameras") or []),
+                              seed=(comp["seed"] if comp.get("seed") is not None
+                                    else _component_seed(spec.seed, i)),
+                              params=dict(comp.get("params") or {}))
+        out, sub = apply_degradation(out, sub)
+        d = sub.to_dict()
+        d.pop("components")
+        resolved.append(d)
+        cams.update(sub.cameras)
+    if out is frames:
+        out = frames.copy()
+    spec.components = resolved
+    spec.severity = max((c["severity"] for c in resolved), default=0.0)
+    spec.cameras = sorted(cams)
+    spec.params = {"n_components": len(resolved), "combo": combo_key(spec)}
+    return out, spec
+
+
 def apply_degradation(frames: np.ndarray, spec: DegradationSpec) -> tuple[np.ndarray, DegradationSpec]:
     """Apply `spec` to frames (n_cam, n_t, 3, H, W) uint8. Returns (degraded, spec with params filled)."""
     assert frames.ndim == 5 and frames.dtype == np.uint8, "expect (n_cam, n_t, 3, H, W) uint8"
+    if spec.family == COMPOSITE:
+        if not any(c.get("severity", 0) > 0 and c["family"] != "clean" for c in spec.components):
+            spec.severity, spec.cameras = 0.0, []
+            return frames.copy(), spec
+        return _apply_composite(frames, spec)
     if spec.family == "clean" or spec.severity <= 0:
         spec.severity = 0.0
         spec.cameras = []
@@ -240,6 +351,35 @@ def sample_spec(seed: int, families=FAMILIES, clean_fraction: float = CLEAN_FRAC
     fam = rng.choice(list(families))
     sev = rng.uniform(0.15, 1.0)
     return DegradationSpec(family=fam, severity=round(sev, 3), seed=seed)
+
+
+def sample_composite_spec(seed: int, families=FAMILIES, n_components: int = 2,
+                          exclude_combos=(), max_tries: int = 64) -> DegradationSpec:
+    """
+    Sample a composite of `n_components` DISTINCT families (each s ~ U(0.15, 1), cameras
+    resolved at apply time), avoiding any family set listed in `exclude_combos` (keys as
+    produced by combo_key, or iterables of family names). Raises if no allowed combo exists.
+    """
+    rng = random.Random(seed)
+    fams = sorted(set(families))
+    excl = {normalize_combo(c) for c in exclude_combos}
+    if len(fams) < n_components:
+        raise ValueError(f"need >= {n_components} families, got {fams}")
+    for _ in range(max_tries):
+        chosen = rng.sample(fams, n_components)
+        if "+".join(sorted(chosen)) not in excl:
+            break
+    else:
+        raise ValueError(f"no allowed {n_components}-family combination in {fams} "
+                         f"outside {sorted(excl)}")
+    comps = [{"family": f, "severity": round(rng.uniform(0.15, 1.0), 3)} for f in chosen]
+    return compose(*comps, seed=seed)
+
+
+def normalize_combo(c) -> str:
+    """"glare+blur", ("glare", "blur") and {"blur", "glare"} all -> "blur+glare"."""
+    parts = c.split("+") if isinstance(c, str) else list(c)
+    return "+".join(sorted(p.strip() for p in parts if p.strip()))
 
 
 # --------------------------------------------------------------------------- target policy
@@ -291,7 +431,16 @@ def target_text(spec: DegradationSpec, clean_reasoning: Optional[str] = None) ->
     """
     if spec.severity <= 0:
         return clean_reasoning or "The road ahead is clearly visible; maintaining lane and speed."
-    cams = spec.cameras or []
+    if spec.family == COMPOSITE:
+        obs = [_observation(c["family"], c.get("cameras") or [])
+               for c in spec.components if c.get("severity", 0) > 0 and c["family"] != "clean"]
+        obs = "; ".join([obs[0]] + [o[0].lower() + o[1:] for o in obs[1:]])
+    else:
+        obs = _observation(spec.family, spec.cameras or [])
+    return f"{obs}; {_level(UNCERTAINTY_LEVELS, spec.severity)}. {_level(_ACTION, spec.severity).capitalize()}."
+
+
+def _observation(family: str, cams: list[int]) -> str:
     names = [_CAM_NAMES.get(c, f"camera {c}") for c in cams]
     if len(names) == 0 or len(names) >= 5:
         cam_str, plural = "all", True
@@ -299,13 +448,12 @@ def target_text(spec: DegradationSpec, clean_reasoning: Optional[str] = None) ->
         cam_str, plural = names[0], False
     else:
         cam_str, plural = ", ".join(names[:-1]) + " and " + names[-1], True
-    obs = _OBSERVATION[spec.family].format(
+    obs = _OBSERVATION[family].format(
         cams=cam_str, s="s" if plural else "", es="es" if plural else "",
         are="are" if plural else "is")
     if cam_str == "all":                      # "the all cameras" -> "all cameras"
         obs = obs.replace("the all ", "all ")
-    obs = obs[0].upper() + obs[1:]
-    return f"{obs}; {_level(UNCERTAINTY_LEVELS, spec.severity)}. {_level(_ACTION, spec.severity).capitalize()}."
+    return obs[0].upper() + obs[1:]
 
 
 def target_trajectory(xy_true: np.ndarray, severity: float,

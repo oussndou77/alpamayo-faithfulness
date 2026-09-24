@@ -249,6 +249,9 @@ afh/                  # the package (Alpamayo FaitHfulness)
     stability.py      # axis 3: agreement across samples
   scorecard.py        # aggregate per-clip + dataset-level faithfulness scorecard
   runner.py           # orchestration: clip -> (inference) -> axes -> score
+  degradation.py      # sensor degradations (single + composite) and target policy
+  uncertainty_dataset.py  # fine-tuning manifests + held-out clip/family/combo split
+  eval_uncertainty.py # calibration / behavior / clean non-regression report
 runners/
   setup_runpod.sh     # one-shot environment setup for an Alpamayo GPU pod
   run_inference.py    # run Alpamayo on clips, save traces + trajectories to disk
@@ -278,9 +281,57 @@ complete and runs cold; training is the next step.
   training time, so nothing heavy is stored and every example is reproducible. ~40% clean
   examples keep the model calibrated rather than permanently anxious.
   `python -m afh.uncertainty_dataset build --records fixtures/records_a2.json --diag fixtures/raw_diag_a2.json`
-- **Evaluation** reuses the causal harness: uncertainty must correlate with severity
-  (`uncertainty_score`), faithfulness on clean input must not regress (Axes 1–4), and the
-  behavior must generalize to degradation families held out from training.
+- **Composite degradations** — a spec can chain several families, each optionally
+  pinned to its own camera (`compose(("glare", .8, [1]), ("blur", .5, [0]))`: glare on the
+  front camera, blur on the front-left one). Components get seeds derived from the
+  parent seed, so a composite is reproducible; single-family specs and legacy manifests
+  are unchanged byte for byte (`--composite-fraction` defaults to 0).
+
+### Held-out evaluation protocol
+
+This follows NVIDIA's request in NVlabs/alpamayo2 issue #9: test on held-out scenes and
+unseen degradation combinations, check that clean-input performance holds, and score
+uncertainty reporting separately from trajectory changes.
+
+1. **Split by clip, then hold out whole families and combinations.** A clip is never on
+   both sides (the clip ranking is sha256-based, so it does not depend on input order).
+   A held-out family never appears in train, alone or inside a composite. For a held-out
+   combination (e.g. `glare+blur`), its parts are still trained on individually but never
+   together. The test manifest adds explicit examples of every held-out item to every test
+   clip, and `check_split` fails on any leak.
+   ```
+   python -m afh.uncertainty_dataset split --records fixtures/records_a2.json \
+       --diag fixtures/raw_diag_a2.json --test-fraction 0.3 \
+       --holdout-family desync --holdout-combo glare+blur --composite-fraction 0.3
+   ```
+2. **Run the baseline and the fine-tuned model on the same test manifest** (GPU, pod).
+   Each result is one JSONL line: clip, spec, reasoning text, predicted trajectory and
+   the **true** future trajectory. See the docstring of `afh/eval_uncertainty.py`.
+3. **Score two independent axes, never merged** (`python -m afh.eval_uncertainty
+   finetuned.jsonl --baseline baseline.jsonl`):
+   - **Calibration:** does the uncertainty the model states (`uncertainty_score`)
+     predict its actual trajectory error? Reports Spearman ρ(uncertainty, ADE) and the
+     AUROC for flagging high-error cases (ADE above the 90th percentile of clean-input
+     ADE). As a reference, the same AUROC is computed with the true severity as the
+     score. Uncertainty that is voiced on every degraded frame scores AUROC 0.5 however
+     cautious it sounds.
+   - **Behavior:** ADE/FDE against the **true future**, not against the damped target
+     and not "the model slowed down". Each result is paired with the same clip on clean
+     input, and with the baseline on the same degraded input. A model that crawls on
+     degraded input gets worse here even when its words are well calibrated.
+   - **Clean non-regression:** fine-tuned vs baseline on s = 0, paired by clip. Covers
+     ADE delta with a bootstrap CI against a 0.10 m tolerance, the false-alarm rate
+     (uncertainty ≥ 0.45 on clean input), and an optional faithfulness delta. A check is
+     `pass` only when the CI clears the tolerance; a mean within tolerance with a CI that
+     does not is `inconclusive`.
+
+   Every metric is broken down into in-distribution, held-out-family, held-out-combo and
+   composite slices, and per combination.
+4. **Not claimed yet:** this is open-loop evaluation. Safety metrics such as collisions,
+   off-road and lane departures, and time to collision need closed-loop re-simulation of
+   the held-out scenes with injected degradations (NuRec, Phase H). Until that runs, a
+   good report here shows calibrated uncertainty and plan fidelity. It does not show safer
+   driving.
 
 ## Where this sits
 
