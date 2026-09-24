@@ -18,8 +18,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import numpy as np
 
 from afh.degradation import (
-    DegradationSpec, FAMILIES, apply_degradation, combo_key, compose,
-    sample_composite_spec, target_text, uncertainty_score,
+    DegradationSpec, FAMILIES, STOP_SEVERITY, UNCERTAINTY_LEVELS, apply_degradation,
+    combo_key, compose, sample_composite_spec, target_text, target_trajectory,
+    uncertainty_score,
 )
 from afh.uncertainty_dataset import (
     UncertaintyDataset, build_manifest, build_split, check_split, clean_cache_from_records,
@@ -109,6 +110,11 @@ def test_composite_all_zero_is_clean_and_sampler_respects_exclusions():
         pass
 
 
+def _level_index(text):
+    """Index in UNCERTAINTY_LEVELS of the level voiced by a target text."""
+    return [thr for thr, _ in UNCERTAINTY_LEVELS].index(uncertainty_score(text))
+
+
 def test_composite_severity_is_noisy_or():
     f = _frames()
     spec = compose(("glare", 0.6, [1]), ("blur", 0.6, [0]), ("noise", 0.6, [2]), seed=1)
@@ -117,9 +123,30 @@ def test_composite_severity_is_noisy_or():
     assert spec.severity == 0.936, "apply must keep the noisy-OR severity"
     single = DegradationSpec("glare", 0.6, [1], seed=1)
     apply_degradation(f, single)
-    # several simultaneous faults are strictly more severe than one, in text as well
-    assert uncertainty_score(target_text(spec)) > uncertainty_score(target_text(single))
+    # 0.936 stays below the 0.95 "no usable visual input" level (coupled to STOP_SEVERITY)
+    text = target_text(spec)
+    assert "I cannot confirm the road ahead is clear" in text, text
+    assert "no usable visual input" not in text and "controlled stop" not in text
+    # escalation: three simultaneous faults voice exactly one level more than one fault
+    assert _level_index(text) == _level_index(target_text(single)) + 1
     assert compose(("glare", 0.6), ("blur", 0.0)).severity == 0.6  # zero fault adds nothing
+
+
+def test_composite_reaching_stop_severity():
+    f = _frames()
+    spec = compose(("glare", 0.65, [1]), ("blur", 0.65, [0]), ("noise", 0.65, [2]), seed=1)
+    _, spec = apply_degradation(f, spec)
+    assert spec.severity == 0.957125, spec.severity               # 1 - 0.35 ** 3
+    assert spec.severity >= STOP_SEVERITY
+    text = target_text(spec)
+    assert "I have no usable visual input and cannot assess the scene" in text, text
+    assert "controlled stop" in text
+    assert uncertainty_score(text) == UNCERTAINTY_LEVELS[-1][0]
+    # the target trajectory is the controlled-stop policy: progress decays to zero
+    xy = np.stack([np.arange(1, 21) * 1.0, np.zeros(20)], 1)
+    tgt = target_trajectory(xy, spec.severity)
+    steps = np.diff(tgt[:, 0], prepend=0.0)
+    assert abs(steps[-1]) < 1e-9 and (np.diff(steps) <= 1e-9).all()
 
 
 # --------------------------------------------------------------------------- split
