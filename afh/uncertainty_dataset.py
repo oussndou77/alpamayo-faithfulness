@@ -23,14 +23,27 @@ frames through `frame_loader(clip_id, t0_us) -> (frames uint8 (n_cam,n_t,3,H,W),
 and applies the degradation. The loader is injected so the class is testable cold and
 independent of alpamayo2_super.
 
+Held-out evaluation — build_split(): train/test are separated by clip_id (a clip is
+never on both sides), and whole families and/or family COMBINATIONS can be reserved for
+test only. The train manifest then never contains a held-out family (alone or inside a
+composite) nor a held-out combination; the test manifest contains every family, single
+and composite, plus explicit examples of each held-out item. check_split() asserts all of
+this and is run by build_split() itself.
+
 CLI (Stage B):
     python -m afh.uncertainty_dataset build \
         --clean-cache fixtures/clean_cache_a2.json \
         --n-per-clip 16 --out outputs/uncertainty_manifest.jsonl
+
+    python -m afh.uncertainty_dataset split \
+        --records fixtures/records_a2.json --diag fixtures/raw_diag_a2.json \
+        --test-fraction 0.3 --holdout-family desync --holdout-combo glare+blur \
+        --composite-fraction 0.3 --out-dir outputs/uncertainty_split
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 from dataclasses import asdict
@@ -39,7 +52,8 @@ from typing import Callable, Iterable
 import numpy as np
 
 from afh.degradation import (
-    DegradationSpec, apply_degradation, sample_spec, target_text, target_trajectory,
+    DegradationSpec, apply_degradation, sample_spec, sample_composite_spec, compose,
+    target_text, target_trajectory, combo_key, spec_families, normalize_combo,
     CLEAN_FRACTION, FAMILIES,
 )
 
@@ -78,21 +92,50 @@ def clean_cache_from_records(records_path: str, diag_path: str | None = None,
 def build_manifest(clean_cache: dict, n_per_clip: int = 16, seed: int = 0,
                    families: Iterable[str] = FAMILIES,
                    clean_fraction: float = CLEAN_FRACTION,
-                   n_cam: int = 7) -> list[dict]:
+                   n_cam: int = 7,
+                   composite_fraction: float = 0.0,
+                   n_components: int = 2,
+                   exclude_combos: Iterable = (),
+                   extra_specs: Iterable[DegradationSpec] | None = None) -> list[dict]:
     """
     For each clip, sample n_per_clip specs and derive targets. Returns a list of dicts
     (one per example). Camera choice inside a spec is resolved at load time by
     apply_degradation (needs n_cam); we pre-resolve it here with a lightweight dry run on
     a tiny dummy tensor so the target TEXT (which names cameras) is fixed in the manifest.
+
+    composite_fraction: share of DEGRADED examples that are composites of `n_components`
+    distinct families (never a combo in `exclude_combos`). Default 0 reproduces the
+    single-family manifests of earlier versions exactly (same seed -> same lines).
+    extra_specs: templates appended for EVERY clip (used to guarantee held-out coverage in
+    a test manifest); each gets a clip-specific seed so clips differ.
     """
     rng = random.Random(seed)
     dummy = np.zeros((n_cam, 4, 3, 8, 8), dtype=np.uint8)
+    families = tuple(families)
+    exclude_combos = tuple(exclude_combos)
     out = []
     for cid, info in clean_cache.items():
         xy_true = np.asarray(info.get("future_xy") or [], dtype=float)
+        specs = []
         for k in range(n_per_clip):
-            spec = sample_spec(rng.randrange(1 << 30), families=families,
-                               clean_fraction=clean_fraction)
+            spec_seed = rng.randrange(1 << 30)
+            spec = sample_spec(spec_seed, families=families, clean_fraction=clean_fraction)
+            # separate stream so composite_fraction=0 leaves the legacy sequence untouched
+            if (composite_fraction > 0 and spec.family != "clean"
+                    and random.Random(spec_seed ^ 0x5EED).random() < composite_fraction):
+                spec = sample_composite_spec(spec_seed, families=families,
+                                             n_components=n_components,
+                                             exclude_combos=exclude_combos)
+            specs.append(spec)
+        for j, tpl in enumerate(extra_specs or ()):
+            d = tpl.to_dict()
+            d["seed"] = _stable_int(f"{seed}:{cid}:extra:{j}")
+            if d.get("components"):
+                specs.append(compose(*[{kk: vv for kk, vv in c.items() if kk != "seed"}
+                                       for c in d["components"]], seed=d["seed"]))
+            else:
+                specs.append(DegradationSpec(**d))
+        for spec in specs:
             # resolve cameras/params deterministically (same seed => same choice on real frames)
             _, spec = apply_degradation(dummy, spec)
             text = target_text(spec, clean_reasoning=info.get("clean_reasoning"))
@@ -104,8 +147,135 @@ def build_manifest(clean_cache: dict, n_per_clip: int = 16, seed: int = 0,
                 "target_text": text,
                 "target_xy": traj,
                 "severity": spec.severity, "family": spec.family,
+                "combo": combo_key(spec),
             })
     return out
+
+
+# --------------------------------------------------------------------------- held-out split
+
+def _stable_int(key: str) -> int:
+    """Process-independent 30-bit integer from a string (Python's hash() is salted)."""
+    return int.from_bytes(hashlib.sha256(key.encode()).digest()[:4], "big") >> 2
+
+
+def split_clips(clip_ids: Iterable[str], test_fraction: float = 0.2,
+                seed: int = 0) -> tuple[list[str], list[str]]:
+    """
+    Deterministic clip-level split. Clips are ranked by sha256(seed:clip_id) and the first
+    round(n * test_fraction) go to test (at least one when test_fraction > 0 and n >= 2).
+    Independent of input order; disjoint by construction.
+    """
+    ids = sorted(set(clip_ids))
+    if not 0.0 <= test_fraction < 1.0:
+        raise ValueError("test_fraction must be in [0, 1)")
+    n_test = int(round(len(ids) * test_fraction))
+    if test_fraction > 0 and len(ids) >= 2:
+        n_test = min(max(n_test, 1), len(ids) - 1)
+    ranked = sorted(ids, key=lambda c: hashlib.sha256(f"{seed}:{c}".encode()).hexdigest())
+    test = set(ranked[:n_test])
+    return [c for c in ids if c not in test], [c for c in ids if c in test]
+
+
+def _holdout_tags(entry: dict, holdout_families: set, holdout_combos: set) -> dict:
+    fams = spec_families(entry["spec"])
+    return {"heldout_family": bool(fams & holdout_families),
+            "heldout_combo": combo_key(entry["spec"]) in holdout_combos}
+
+
+def build_split(clean_cache: dict, test_fraction: float = 0.2, seed: int = 0,
+                holdout_families: Iterable[str] = (), holdout_combos: Iterable = (),
+                n_per_clip: int = 16, n_test_per_clip: int | None = None,
+                n_holdout_per_clip: int = 2,
+                composite_fraction: float = 0.0, n_components: int = 2,
+                clean_fraction: float = CLEAN_FRACTION, n_cam: int = 7,
+                families: Iterable[str] = FAMILIES) -> dict:
+    """
+    Held-out train/test manifests.
+
+      train: train clips only; families minus holdout_families; composites never form a
+             holdout combo nor contain a held-out family.
+      test:  test clips only; all families (single + composite, incl. held-out combos),
+             plus n_holdout_per_clip explicit examples per held-out family and per held-out
+             combo so every held-out item is measured on every test clip. Clean examples
+             stay in test (clean_fraction) for the non-regression report.
+
+    Every entry gets split="train"/"test" and heldout_family / heldout_combo tags, so the
+    evaluator can report in-distribution and held-out slices separately.
+    Returns {"train": [...], "test": [...], "meta": {...}}.
+    """
+    families = tuple(families)
+    h_fam = set(holdout_families)
+    h_combo = {normalize_combo(c) for c in holdout_combos}
+    unknown = h_fam - set(families)
+    for c in h_combo:
+        unknown |= set(c.split("+")) - set(families)
+    if unknown:
+        raise ValueError(f"unknown held-out families: {sorted(unknown)}")
+    train_fams = tuple(f for f in families if f not in h_fam)
+    if not train_fams:
+        raise ValueError("all families are held out; nothing left to train on")
+    # a combo already excluded via a held-out family needs no separate exclusion, but
+    # listing it is harmless; composites need n_components distinct train families
+    train_comp = composite_fraction if len(train_fams) >= n_components else 0.0
+
+    train_ids, test_ids = split_clips(clean_cache.keys(), test_fraction, seed)
+    train_cache = {c: clean_cache[c] for c in train_ids}
+    test_cache = {c: clean_cache[c] for c in test_ids}
+
+    train = build_manifest(train_cache, n_per_clip=n_per_clip, seed=seed,
+                           families=train_fams, clean_fraction=clean_fraction, n_cam=n_cam,
+                           composite_fraction=train_comp, n_components=n_components,
+                           exclude_combos=h_combo)
+    extra = []
+    for f in sorted(h_fam):
+        extra += [DegradationSpec(family=f, severity=sev)
+                  for sev in _holdout_severities(n_holdout_per_clip)]
+    for c in sorted(h_combo):
+        extra += [compose(*[(f, sev) for f in c.split("+")])
+                  for sev in _holdout_severities(n_holdout_per_clip)]
+    test = build_manifest(test_cache, n_per_clip=(n_test_per_clip if n_test_per_clip
+                                                   is not None else n_per_clip),
+                          seed=seed + 1, families=families, clean_fraction=clean_fraction,
+                          n_cam=n_cam, composite_fraction=composite_fraction,
+                          n_components=n_components, extra_specs=extra)
+    for name, entries in (("train", train), ("test", test)):
+        for e in entries:
+            e["split"] = name
+            e.update(_holdout_tags(e, h_fam, h_combo))
+    meta = {"seed": seed, "test_fraction": test_fraction,
+            "train_clips": train_ids, "test_clips": test_ids,
+            "holdout_families": sorted(h_fam), "holdout_combos": sorted(h_combo),
+            "composite_fraction": composite_fraction, "n_components": n_components}
+    check_split(train, test, h_fam, h_combo)
+    return {"train": train, "test": test, "meta": meta}
+
+
+def _holdout_severities(n: int) -> list[float]:
+    """Evenly spread severities in [0.3, 1.0] so held-out items cover mild to severe."""
+    if n <= 0:
+        return []
+    if n == 1:
+        return [0.7]
+    return [round(0.3 + 0.7 * i / (n - 1), 3) for i in range(n)]
+
+
+def check_split(train: list[dict], test: list[dict], holdout_families: Iterable[str] = (),
+                holdout_combos: Iterable = ()) -> None:
+    """Raise ValueError if a clip is on both sides or a held-out item leaked into train."""
+    overlap = {e["clip_id"] for e in train} & {e["clip_id"] for e in test}
+    if overlap:
+        raise ValueError(f"clip leakage: {sorted(overlap)[:5]} in both train and test")
+    h_fam = set(holdout_families)
+    h_combo = {normalize_combo(c) for c in holdout_combos}
+    for e in train:
+        fams = spec_families(e["spec"])
+        if fams & h_fam:
+            raise ValueError(f"held-out family {sorted(fams & h_fam)} in train "
+                             f"(clip {e['clip_id']})")
+        if combo_key(e["spec"]) in h_combo:
+            raise ValueError(f"held-out combo {combo_key(e['spec'])} in train "
+                             f"(clip {e['clip_id']})")
 
 
 def write_manifest(entries: list[dict], path: str) -> None:
@@ -127,10 +297,20 @@ def manifest_summary(entries: list[dict]) -> str:
     for e in entries:
         fam[e["family"]] = fam.get(e["family"], 0) + 1
     clips = len({e["clip_id"] for e in entries})
+    combos = {}
+    for e in entries:
+        k = e.get("combo") or combo_key(e["spec"])
+        if "+" in k:
+            combos[k] = combos.get(k, 0) + 1
     sev = [e["severity"] for e in entries if e["severity"] > 0]
     lines = [f"{n} examples over {clips} clips",
              "  " + ", ".join(f"{k}: {v}" for k, v in sorted(fam.items())),
              f"  clean fraction: {fam.get('clean', 0) / max(n, 1):.0%}"]
+    if combos:
+        lines.append("  composites: " + ", ".join(f"{k}: {v}" for k, v in sorted(combos.items())))
+    ho = [e for e in entries if e.get("heldout_family") or e.get("heldout_combo")]
+    if ho:
+        lines.append(f"  held-out examples: {len(ho)}")
     if sev:
         lines.append(f"  severity (degraded only): mean {np.mean(sev):.2f}, "
                      f"min {min(sev):.2f}, max {max(sev):.2f}")
@@ -197,21 +377,50 @@ def _main():
     b.add_argument("--seed", type=int, default=0)
     b.add_argument("--n-cam", type=int, default=7)
     b.add_argument("--out", default="outputs/uncertainty_manifest.jsonl")
+    b.add_argument("--composite-fraction", type=float, default=0.0)
+    sp = sub.add_parser("split", help="held-out train/test manifests (by clip, family, combo)")
+    sp.add_argument("--clean-cache")
+    sp.add_argument("--records")
+    sp.add_argument("--diag")
+    sp.add_argument("--test-fraction", type=float, default=0.2)
+    sp.add_argument("--holdout-family", action="append", default=[])
+    sp.add_argument("--holdout-combo", action="append", default=[],
+                    help='e.g. "glare+blur" (repeatable)')
+    sp.add_argument("--composite-fraction", type=float, default=0.3)
+    sp.add_argument("--n-per-clip", type=int, default=16)
+    sp.add_argument("--seed", type=int, default=0)
+    sp.add_argument("--n-cam", type=int, default=7)
+    sp.add_argument("--out-dir", default="outputs/uncertainty_split")
     s = sub.add_parser("summary")
     s.add_argument("manifest")
     a = ap.parse_args()
 
-    if a.cmd == "build":
+    def load_cache():
         if a.clean_cache:
-            cache = json.load(open(a.clean_cache))
-        elif a.records:
-            cache = clean_cache_from_records(a.records, a.diag)
-        else:
-            ap.error("provide --clean-cache or --records")
-        entries = build_manifest(cache, n_per_clip=a.n_per_clip, seed=a.seed, n_cam=a.n_cam)
+            return json.load(open(a.clean_cache))
+        if a.records:
+            return clean_cache_from_records(a.records, a.diag)
+        ap.error("provide --clean-cache or --records")
+
+    if a.cmd == "build":
+        entries = build_manifest(load_cache(), n_per_clip=a.n_per_clip, seed=a.seed,
+                                 n_cam=a.n_cam, composite_fraction=a.composite_fraction)
         write_manifest(entries, a.out)
         print(manifest_summary(entries))
         print(f"-> {a.out}")
+    elif a.cmd == "split":
+        import os
+        sp = build_split(load_cache(), test_fraction=a.test_fraction, seed=a.seed,
+                         holdout_families=a.holdout_family, holdout_combos=a.holdout_combo,
+                         n_per_clip=a.n_per_clip, composite_fraction=a.composite_fraction,
+                         n_cam=a.n_cam)
+        for name in ("train", "test"):
+            path = os.path.join(a.out_dir, f"{name}.jsonl")
+            write_manifest(sp[name], path)
+            print(f"[{name}] {len(sp['meta'][name + '_clips'])} clips -> {path}")
+            print(manifest_summary(sp[name]))
+        with open(os.path.join(a.out_dir, "split_meta.json"), "w") as fh:
+            json.dump(sp["meta"], fh, indent=2)
     else:
         print(manifest_summary(read_manifest(a.manifest)))
 
