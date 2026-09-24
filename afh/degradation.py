@@ -58,7 +58,7 @@ COMPOSITE = "composite"
 @dataclass
 class DegradationSpec:
     family: str                       # one of FAMILIES, "clean", or COMPOSITE
-    severity: float                   # 0..1 (composite: max over components, see compose)
+    severity: float                   # 0..1 (composite: noisy-OR of components, see compose)
     cameras: list[int] = field(default_factory=list)  # tensor indices affected
     seed: int = 0
     params: dict = field(default_factory=dict)        # family-specific, filled by apply
@@ -100,6 +100,17 @@ def spec_families(spec) -> set[str]:
     return set() if k == "clean" else set(k.split("+"))
 
 
+def combine_severities(severities) -> float:
+    """
+    Noisy-OR: 1 - prod(1 - s_i), each s_i clipped to [0, 1]; 0 for no components.
+    Rounded to 6 decimals so manifests do not carry float noise (1 - 0.4**3 -> 0.936).
+    """
+    keep = 1.0
+    for s in severities:
+        keep *= 1.0 - float(np.clip(s, 0.0, 1.0))
+    return round(1.0 - keep, 6)
+
+
 def _component_seed(parent_seed: int, index: int) -> int:
     """Deterministic, well-mixed child seed (no Python hash(): it is salted per process)."""
     return int(np.random.SeedSequence([int(parent_seed), int(index)]).generate_state(1)[0])
@@ -113,8 +124,11 @@ def compose(*components, seed: int = 0) -> DegradationSpec:
     (family, severity[, cameras]) are accepted as shorthand.
 
     Component seeds that are not given explicitly are derived from `seed` and the index.
-    Composite severity = max component severity: a POLICY choice (the worst fault drives
-    the stated uncertainty; faults are not summed), documented like ALPHA/BETA.
+    Composite severity = noisy-OR of the components, 1 - prod(1 - s_i) (see
+    combine_severities). This is a POLICY choice, documented like ALPHA/BETA: simultaneous
+    faults are treated as independent chances of losing the scene, so a composite is
+    always at least as severe as its worst component and strictly more severe when a
+    second non-zero fault is added (e.g. three components at 0.6 -> 0.936).
     """
     comps = []
     for i, c in enumerate(components):
@@ -136,7 +150,7 @@ def compose(*components, seed: int = 0) -> DegradationSpec:
             d["seed"] = _component_seed(seed, i)
         d["cameras"] = list(d.get("cameras") or [])
         comps.append(d)
-    sev = max((c["severity"] for c in comps), default=0.0)
+    sev = combine_severities(c["severity"] for c in comps if c["family"] != "clean")
     return DegradationSpec(family=COMPOSITE, severity=sev, seed=seed, components=comps)
 
 
@@ -318,7 +332,8 @@ def _apply_composite(frames, spec):
     if out is frames:
         out = frames.copy()
     spec.components = resolved
-    spec.severity = max((c["severity"] for c in resolved), default=0.0)
+    spec.severity = combine_severities(c["severity"] for c in resolved
+                                       if c["family"] != "clean")
     spec.cameras = sorted(cams)
     spec.params = {"n_components": len(resolved), "combo": combo_key(spec)}
     return out, spec

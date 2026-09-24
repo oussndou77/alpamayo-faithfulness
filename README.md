@@ -283,7 +283,9 @@ complete and runs cold; training is the next step.
   `python -m afh.uncertainty_dataset build --records fixtures/records_a2.json --diag fixtures/raw_diag_a2.json`
 - **Composite degradations** — a spec can chain several families, each optionally
   pinned to its own camera (`compose(("glare", .8, [1]), ("blur", .5, [0]))`: glare on the
-  front camera, blur on the front-left one). Components get seeds derived from the
+  front camera, blur on the front-left one). Composite severity is the noisy-OR
+  1 − Π(1 − sᵢ), so simultaneous faults are more severe than any one of them (three at 0.6
+  give 0.936). Components get seeds derived from the
   parent seed, so a composite is reproducible; single-family specs and legacy manifests
   are unchanged byte for byte (`--composite-fraction` defaults to 0).
 

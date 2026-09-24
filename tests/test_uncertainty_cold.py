@@ -63,7 +63,7 @@ def test_composite_on_different_cameras():
     spec = compose(("glare", 0.8, [1]), ("blur", 0.5, [0]), seed=3)
     out, spec = apply_degradation(f, spec)
     assert spec.family == "composite" and combo_key(spec) == "blur+glare"
-    assert spec.cameras == [0, 1] and spec.severity == 0.8
+    assert spec.cameras == [0, 1] and abs(spec.severity - 0.9) < 1e-9   # 1 - 0.2 * 0.5
     untouched = [c for c in range(7) if c not in (0, 1)]
     assert (out[untouched] == f[untouched]).all(), "other cameras must be untouched"
     # each camera matches its single-family degradation with the component's own seed
@@ -107,6 +107,19 @@ def test_composite_all_zero_is_clean_and_sampler_respects_exclusions():
         raise AssertionError("expected ValueError: no allowed combination")
     except ValueError:
         pass
+
+
+def test_composite_severity_is_noisy_or():
+    f = _frames()
+    spec = compose(("glare", 0.6, [1]), ("blur", 0.6, [0]), ("noise", 0.6, [2]), seed=1)
+    assert spec.severity == 0.936, spec.severity                  # 1 - 0.4 ** 3
+    _, spec = apply_degradation(f, spec)
+    assert spec.severity == 0.936, "apply must keep the noisy-OR severity"
+    single = DegradationSpec("glare", 0.6, [1], seed=1)
+    apply_degradation(f, single)
+    # several simultaneous faults are strictly more severe than one, in text as well
+    assert uncertainty_score(target_text(spec)) > uncertainty_score(target_text(single))
+    assert compose(("glare", 0.6), ("blur", 0.0)).severity == 0.6  # zero fault adds nothing
 
 
 # --------------------------------------------------------------------------- split
