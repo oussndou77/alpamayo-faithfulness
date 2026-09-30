@@ -355,7 +355,8 @@ def _apply_composite(frames, spec):
     spec.severity = combine_severities(c["severity"] for c in resolved
                                        if c["family"] != "clean")
     spec.cameras = sorted(cams)
-    spec.params = {"n_components": len(resolved), "combo": combo_key(spec)}
+    spec.params = {"n_components": len(resolved), "combo": combo_key(spec),
+                   "n_cam_total": int(frames.shape[0])}
     _store_ci(spec, _spec_ci_from(resolved))
     return out, spec
 
@@ -416,6 +417,7 @@ def apply_degradation(frames: np.ndarray, spec: DegradationSpec,
     spec.severity = float(np.clip(spec.severity, 0.0, 1.0))
     out = _APPLY[spec.family](frames, spec, _rng(spec.seed))
     _store_ci(spec, ci)          # families rewrite params; keep the mapping
+    spec.params["n_cam_total"] = int(frames.shape[0])   # "all cameras" needs the count
     return out, spec
 
 
@@ -544,12 +546,13 @@ def target_text(spec: DegradationSpec, clean_reasoning: Optional[str] = None,
     if spec.severity <= 0:
         return clean_reasoning or "The road ahead is clearly visible; maintaining lane and speed."
     ci = check_camera_indices(camera_indices if camera_indices is not None else _spec_ci(spec))
+    n_total = len(ci) if ci is not None else (spec.params or {}).get("n_cam_total")
     if spec.family == COMPOSITE:
-        obs = [_observation(c["family"], c.get("cameras") or [], c["severity"], ci)
+        obs = [_observation(c["family"], c.get("cameras") or [], c["severity"], ci, n_total)
                for c in spec.components if c.get("severity", 0) > 0 and c["family"] != "clean"]
         obs = "; ".join([obs[0]] + [o[0].lower() + o[1:] for o in obs[1:]])
     else:
-        obs = _observation(spec.family, spec.cameras or [], spec.severity, ci)
+        obs = _observation(spec.family, spec.cameras or [], spec.severity, ci, n_total)
     ts = target_severity(spec, camera_indices=ci)
     return f"{obs}; {_level(UNCERTAINTY_LEVELS, ts)}. {_level(_ACTION, ts).capitalize()}."
 
@@ -603,12 +606,13 @@ def target_severity(spec, camera_indices: Optional[Iterable[int]] = None) -> flo
 
 
 def _observation(family: str, cams: list[int], severity: float,
-                 camera_indices: Optional[list[int]] = None) -> str:
+                 camera_indices: Optional[list[int]] = None,
+                 n_total: Optional[int] = None) -> str:
     names = [camera_name(c, camera_indices) for c in cams]
-    # "all": every camera of the tensor when the loader order is known; otherwise the
-    # legacy 7-camera shorthand (5 or more cameras), kept so old manifests do not change
-    is_all = (len(names) == len(camera_indices) if camera_indices is not None
-              else len(names) >= 5)
+    # "all" means every camera of the tensor, nothing less: 5 or 6 black cameras out of 7
+    # are listed. n_total comes from camera_indices or from the applied spec; when it is
+    # unknown (spec never applied) cameras are always listed.
+    is_all = n_total is not None and len(set(cams)) >= n_total
     if len(names) == 0 or is_all:
         cam_str, plural = "all", True
     elif len(names) == 1:
