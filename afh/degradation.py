@@ -39,9 +39,12 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import Iterable, Optional
 
 import numpy as np
+
+from afh.cameras import (CAM_INDEX_TO_ID, FRONT_CAMERA_IDS, camera_name,
+                         check_camera_indices, front_positions)
 
 FAMILIES = ("blackout", "glare", "occlusion", "blur", "noise", "freeze", "desync")
 
@@ -53,7 +56,9 @@ BLEND_SEVERITY = 0.70   # s0: above this, the target trajectory blends toward a 
 CLEAN_FRACTION = 0.40   # share of s = 0 examples in a generated dataset
 
 # ---- camera-aware target severity (a POLICY, see target_severity) ----
-FRONT_CAMERAS = (1, 6)  # loader order: 1 = front_wide, 6 = front_tele
+# forward cameras as LOADER indices (front_wide, front_tele), derived from camera ids.
+# Tensor positions are resolved through camera_indices (afh.cameras); see apply_degradation.
+FRONT_CAMERAS = tuple(i for i, cid in CAM_INDEX_TO_ID.items() if cid in FRONT_CAMERA_IDS)
 BLACKOUT_ONE_FRONT_FLOOR = 0.45   # a forward camera is black -> "visibility ahead is reduced"
 BLACKOUT_ALL_FRONT_FLOOR = 0.70   # no forward camera left -> "I cannot confirm ..."
 # every camera black -> STOP_SEVERITY ("I have no usable visual input"): the case reported
@@ -191,15 +196,15 @@ def _blur_image(img: np.ndarray, sigma: float) -> np.ndarray:
         return np.clip(f, 0, 255).astype(np.uint8)
 
 
-def _choose_cameras(rng, n_cam: int, severity: float, min_k: int = 1) -> list[int]:
-    """More severity -> more cameras affected. Front cameras (1, 6) weighted higher."""
+def _choose_cameras(rng, n_cam: int, severity: float, min_k: int = 1,
+                    camera_indices: Optional[list[int]] = None) -> list[int]:
+    """More severity -> more cameras affected. Forward cameras weighted higher, found by
+    camera id through camera_indices (fallback: tensor position == loader index)."""
     k = max(min_k, int(round(severity * n_cam)))
     k = min(k, n_cam)
-    # bias toward forward-facing indices when present (loader order: 1=front_wide, 6=front_tele)
     weights = np.ones(n_cam)
-    for fwd in (1, 6):
-        if fwd < n_cam:
-            weights[fwd] = 3.0
+    for fwd in front_positions(n_cam, camera_indices):
+        weights[fwd] = 3.0
     weights /= weights.sum()
     return sorted(rng.choice(n_cam, size=k, replace=False, p=weights).tolist())
 
@@ -208,7 +213,8 @@ def _choose_cameras(rng, n_cam: int, severity: float, min_k: int = 1) -> list[in
 
 def _blackout(frames, spec, rng):
     out = frames.copy()
-    cams = spec.cameras or _choose_cameras(rng, frames.shape[0], spec.severity)
+    cams = spec.cameras or _choose_cameras(rng, frames.shape[0], spec.severity,
+                                          camera_indices=_spec_ci(spec))
     out[cams] = 0
     spec.cameras = cams
     spec.params = {"n_cameras": len(cams), "n_cam_total": int(frames.shape[0])}
@@ -218,7 +224,8 @@ def _blackout(frames, spec, rng):
 def _glare(frames, spec, rng):
     out = frames.copy()
     n_cam, n_t, _, H, W = frames.shape
-    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity)
+    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity,
+                                          camera_indices=_spec_ci(spec))
     # halo center in the upper half (sun/headlights), radius grows with severity
     cy, cx = rng.uniform(0.15, 0.5) * H, rng.uniform(0.2, 0.8) * W
     radius = (0.15 + 0.55 * spec.severity) * max(H, W)
@@ -239,7 +246,8 @@ def _glare(frames, spec, rng):
 def _occlusion(frames, spec, rng):
     out = frames.copy()
     n_cam, n_t, _, H, W = frames.shape
-    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity)
+    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity,
+                                          camera_indices=_spec_ci(spec))
     # opaque blob(s) covering a fraction of the image that grows with severity
     frac = 0.05 + 0.55 * spec.severity
     n_blobs = 1 + int(spec.severity * 3)
@@ -263,7 +271,8 @@ def _occlusion(frames, spec, rng):
 def _blur(frames, spec, rng):
     out = frames.copy()
     n_cam = frames.shape[0]
-    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity)
+    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity,
+                                          camera_indices=_spec_ci(spec))
     sigma = 1.0 + 14.0 * spec.severity          # up to ~15 px at s=1
     for c in cams:
         for t in range(frames.shape[1]):
@@ -276,7 +285,8 @@ def _blur(frames, spec, rng):
 def _noise(frames, spec, rng):
     out = frames.copy()
     n_cam = frames.shape[0]
-    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity)
+    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity,
+                                          camera_indices=_spec_ci(spec))
     lum = 1.0 - 0.8 * spec.severity              # darken to 20% at s=1
     sigma = 5.0 + 60.0 * spec.severity           # heavy sensor noise at s=1
     for c in cams:
@@ -292,7 +302,8 @@ def _freeze(frames, spec, rng):
     """Repeat an early frame over the last k timesteps (sensor stuck)."""
     out = frames.copy()
     n_cam, n_t = frames.shape[:2]
-    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity)
+    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity,
+                                          camera_indices=_spec_ci(spec))
     k = max(1, int(round(spec.severity * (n_t - 1))))   # frames frozen, up to n_t-1
     for c in cams:
         src = n_t - 1 - k
@@ -306,7 +317,8 @@ def _desync(frames, spec, rng):
     """Shift the time axis of some cameras (clock drift) — subtle, image stays plausible."""
     out = frames.copy()
     n_cam, n_t = frames.shape[:2]
-    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity)
+    cams = spec.cameras or _choose_cameras(rng, n_cam, spec.severity,
+                                          camera_indices=_spec_ci(spec))
     shift = max(1, int(round(spec.severity * (n_t - 1))))
     for c in cams:
         out[c] = np.roll(frames[c], shift, axis=0)
@@ -332,7 +344,7 @@ def _apply_composite(frames, spec):
                               seed=(comp["seed"] if comp.get("seed") is not None
                                     else _component_seed(spec.seed, i)),
                               params=dict(comp.get("params") or {}))
-        out, sub = apply_degradation(out, sub)
+        out, sub = apply_degradation(out, sub, camera_indices=_spec_ci(spec))
         d = sub.to_dict()
         d.pop("components")
         resolved.append(d)
@@ -344,12 +356,52 @@ def _apply_composite(frames, spec):
                                        if c["family"] != "clean")
     spec.cameras = sorted(cams)
     spec.params = {"n_components": len(resolved), "combo": combo_key(spec)}
+    _store_ci(spec, _spec_ci_from(resolved))
     return out, spec
 
 
-def apply_degradation(frames: np.ndarray, spec: DegradationSpec) -> tuple[np.ndarray, DegradationSpec]:
-    """Apply `spec` to frames (n_cam, n_t, 3, H, W) uint8. Returns (degraded, spec with params filled)."""
+def _spec_ci(spec) -> Optional[list[int]]:
+    d = spec.to_dict() if isinstance(spec, DegradationSpec) else spec
+    return (d.get("params") or {}).get("camera_indices")
+
+
+def _spec_ci_from(components: list[dict]) -> Optional[list[int]]:
+    for c in components:
+        ci = (c.get("params") or {}).get("camera_indices")
+        if ci is not None:
+            return ci
+    return None
+
+
+def _store_ci(spec: DegradationSpec, ci: Optional[list[int]]) -> None:
+    """Record the loader order in the spec (only when known: old manifests stay byte-identical)."""
+    if ci is not None:
+        spec.params["camera_indices"] = list(ci)
+
+
+def apply_degradation(frames: np.ndarray, spec: DegradationSpec,
+                      camera_indices: Optional[Iterable[int]] = None
+                      ) -> tuple[np.ndarray, DegradationSpec]:
+    """
+    Apply `spec` to frames (n_cam, n_t, 3, H, W) uint8. Returns (degraded, spec with params
+    filled).
+
+    camera_indices: the loader's data["camera_indices"] (tensor position -> loader camera
+    index, see afh.cameras). With it, forward cameras are found by camera id wherever they
+    sit in the tensor (front_tele is position 3 of the 4-camera loader [0, 1, 2, 6]), and
+    it is stored in spec.params so target_text / target_severity / re-application use the
+    same mapping. May also come from spec.params (a manifest spec, or sample_spec).
+    Without it: documented fallback, tensor position == loader index (7-camera order);
+    spec.cameras are always tensor positions either way.
+    """
     assert frames.ndim == 5 and frames.dtype == np.uint8, "expect (n_cam, n_t, 3, H, W) uint8"
+    stored = _spec_ci(spec)
+    ci = check_camera_indices(camera_indices if camera_indices is not None else stored,
+                              n_cam=frames.shape[0])
+    if camera_indices is not None and stored is not None and list(stored) != ci:
+        raise ValueError(f"camera_indices {ci} contradicts the spec's stored {stored}")
+    if ci is not None:
+        spec.params = {**(spec.params or {}), "camera_indices": ci}
     if spec.family == COMPOSITE:
         if not any(c.get("severity", 0) > 0 and c["family"] != "clean" for c in spec.components):
             spec.severity, spec.cameras = 0.0, []
@@ -363,17 +415,25 @@ def apply_degradation(frames: np.ndarray, spec: DegradationSpec) -> tuple[np.nda
         raise ValueError(f"unknown family {spec.family!r}; choose from {FAMILIES}")
     spec.severity = float(np.clip(spec.severity, 0.0, 1.0))
     out = _APPLY[spec.family](frames, spec, _rng(spec.seed))
+    _store_ci(spec, ci)          # families rewrite params; keep the mapping
     return out, spec
 
 
-def sample_spec(seed: int, families=FAMILIES, clean_fraction: float = CLEAN_FRACTION) -> DegradationSpec:
-    """Sample one training spec: clean with prob clean_fraction, else a family with s ~ U(0.15, 1)."""
+def sample_spec(seed: int, families=FAMILIES, clean_fraction: float = CLEAN_FRACTION,
+                camera_indices: Optional[Iterable[int]] = None) -> DegradationSpec:
+    """
+    Sample one training spec: clean with prob clean_fraction, else a family with
+    s ~ U(0.15, 1). camera_indices (the clip's loader order) is stored in the spec so that
+    apply_degradation picks forward cameras by id; the random draws do not depend on it.
+    """
     rng = random.Random(seed)
+    ci = check_camera_indices(camera_indices)
+    params = {"camera_indices": ci} if ci is not None else {}
     if rng.random() < clean_fraction:
-        return DegradationSpec(family="clean", severity=0.0, seed=seed)
+        return DegradationSpec(family="clean", severity=0.0, seed=seed, params=params)
     fam = rng.choice(list(families))
     sev = rng.uniform(0.15, 1.0)
-    return DegradationSpec(family=fam, severity=round(sev, 3), seed=seed)
+    return DegradationSpec(family=fam, severity=round(sev, 3), seed=seed, params=params)
 
 
 def sample_composite_spec(seed: int, families=FAMILIES, n_components: int = 2,
@@ -407,8 +467,6 @@ def normalize_combo(c) -> str:
 
 # --------------------------------------------------------------------------- target policy
 
-_CAM_NAMES = {0: "front-left", 1: "front", 2: "front-right", 3: "rear-left",
-              4: "rear", 5: "rear-right", 6: "front telephoto"}
 
 # Observation wording is graded by the severity of the fault it describes, in three bands
 # whose edges are the UNCERTAINTY_LEVELS thresholds 0.45 ("visibility ahead is reduced")
@@ -476,7 +534,8 @@ def _level(table, s):
     return out
 
 
-def target_text(spec: DegradationSpec, clean_reasoning: Optional[str] = None) -> str:
+def target_text(spec: DegradationSpec, clean_reasoning: Optional[str] = None,
+                camera_indices: Optional[Iterable[int]] = None) -> str:
     """
     Target CoC text for a degradation spec.
     For s = 0 the target is the model's own clean reasoning (preserve behavior).
@@ -484,17 +543,18 @@ def target_text(spec: DegradationSpec, clean_reasoning: Optional[str] = None) ->
     """
     if spec.severity <= 0:
         return clean_reasoning or "The road ahead is clearly visible; maintaining lane and speed."
+    ci = check_camera_indices(camera_indices if camera_indices is not None else _spec_ci(spec))
     if spec.family == COMPOSITE:
-        obs = [_observation(c["family"], c.get("cameras") or [], c["severity"])
+        obs = [_observation(c["family"], c.get("cameras") or [], c["severity"], ci)
                for c in spec.components if c.get("severity", 0) > 0 and c["family"] != "clean"]
         obs = "; ".join([obs[0]] + [o[0].lower() + o[1:] for o in obs[1:]])
     else:
-        obs = _observation(spec.family, spec.cameras or [], spec.severity)
-    ts = target_severity(spec)
+        obs = _observation(spec.family, spec.cameras or [], spec.severity, ci)
+    ts = target_severity(spec, camera_indices=ci)
     return f"{obs}; {_level(UNCERTAINTY_LEVELS, ts)}. {_level(_ACTION, ts).capitalize()}."
 
 
-def target_severity(spec) -> float:
+def target_severity(spec, camera_indices: Optional[Iterable[int]] = None) -> float:
     """
     Severity the TARGETS (uncertainty level, action, trajectory) are built from. It is
     spec.severity (the physical intensity of the degradation) raised, never lowered, when
@@ -511,19 +571,28 @@ def target_severity(spec) -> float:
     it is the one family that destroys the camera's image entirely at ANY severity; the
     other families damage the image in proportion to s, which the level already follows.
 
+    Front cameras are recognised by camera ID: camera_indices (argument, else the one
+    apply_degradation stored in the spec) maps each tensor position to its loader camera,
+    so front_tele is caught at position 3 of the 4-camera loader [0, 1, 2, 6] or at
+    position 5 of the 6-camera Alpamayo 2 Super profile [0, 1, 2, 3, 5, 6]. Without it:
+    documented fallback, tensor position == loader index (7-camera order).
+
     Call it on a spec resolved by apply_degradation (cameras and params filled).
     Composites: noisy-OR of the components' target severities.
     """
     d = spec.to_dict() if isinstance(spec, DegradationSpec) else spec
+    ci = check_camera_indices(camera_indices if camera_indices is not None else _spec_ci(d))
     if d["family"] == COMPOSITE:
-        return combine_severities(target_severity(c) for c in d.get("components", [])
-                                  if c["family"] != "clean")
+        return combine_severities(target_severity(c, camera_indices=ci)
+                                  for c in d.get("components", []) if c["family"] != "clean")
     s = float(d.get("severity", 0.0))
     if d["family"] != "blackout" or s <= 0:
         return s
     lost = set(d.get("cameras") or [])
     n_total = (d.get("params") or {}).get("n_cam_total")
-    fronts = [c for c in FRONT_CAMERAS if n_total is None or c < n_total]
+    if n_total is None and ci is not None:
+        n_total = len(ci)
+    fronts = front_positions(n_total, ci)
     if n_total is not None and len(lost) >= n_total:
         return max(s, STOP_SEVERITY)
     if fronts and set(fronts) <= lost:
@@ -533,9 +602,14 @@ def target_severity(spec) -> float:
     return s
 
 
-def _observation(family: str, cams: list[int], severity: float) -> str:
-    names = [_CAM_NAMES.get(c, f"camera {c}") for c in cams]
-    if len(names) == 0 or len(names) >= 5:
+def _observation(family: str, cams: list[int], severity: float,
+                 camera_indices: Optional[list[int]] = None) -> str:
+    names = [camera_name(c, camera_indices) for c in cams]
+    # "all": every camera of the tensor when the loader order is known; otherwise the
+    # legacy 7-camera shorthand (5 or more cameras), kept so old manifests do not change
+    is_all = (len(names) == len(camera_indices) if camera_indices is not None
+              else len(names) >= 5)
+    if len(names) == 0 or is_all:
         cam_str, plural = "all", True
     elif len(names) == 1:
         cam_str, plural = names[0], False

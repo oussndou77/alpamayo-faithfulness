@@ -610,6 +610,121 @@ def test_eval_reference_uses_target_severity():
     assert beh["n_paired_baseline"] == 12 and beh["ade_delta_vs_baseline"] == 0.0
 
 
+LOADER_4CAM = [0, 1, 2, 6]             # front_tele is tensor position 3
+LOADER_6CAM = [0, 1, 2, 3, 5, 6]       # Alpamayo 2 Super: front_tele at 5, no rear_tele
+
+
+def test_front_floor_on_4cam_loader_tele_at_position_3():
+    """4-camera loader [0,1,2,6]: tensor position 3 is front_tele. Black -> front floor."""
+    f = _frames(n_cam=4)
+    for s in (0.05, 0.15, 0.3):
+        _, spec = apply_degradation(f, DegradationSpec("blackout", s, [3], seed=0),
+                                    camera_indices=LOADER_4CAM)
+        text = target_text(spec)
+        assert target_severity(spec) >= 0.45, (s, target_severity(spec))
+        assert "Front telephoto camera" in text and "clearly visible" not in text, text
+        # the same spec read by position alone (fallback) would call it rear-left
+        fb = DegradationSpec("blackout", s, [3], seed=0)
+        _, fb = apply_degradation(f, fb)
+        assert "Rear-left" in target_text(fb) and target_severity(fb) == s
+    # both forward cameras of this loader (positions 1 and 3) -> "cannot confirm"
+    _, both = apply_degradation(f, DegradationSpec("blackout", 0.2, [1, 3], seed=0),
+                                camera_indices=LOADER_4CAM)
+    assert target_severity(both) >= 0.70 and "cannot confirm" in target_text(both)
+    # rear/side positions of this loader get no floor
+    _, side = apply_degradation(f, DegradationSpec("blackout", 0.15, [0], seed=0),
+                                camera_indices=LOADER_4CAM)
+    assert target_severity(side) == 0.15
+
+
+def test_front_floor_on_6cam_super_profile():
+    """Alpamayo 2 Super [0,1,2,3,5,6]: front_wide at 1, front_tele at 5 (rear_right if read
+    by position). All six black is the NVlabs/alpamayo2#9 case: no usable input, stop."""
+    f = _frames(n_cam=6)
+    _, tele = apply_degradation(f, DegradationSpec("blackout", 0.15, [5], seed=0),
+                                camera_indices=LOADER_6CAM)
+    assert target_severity(tele) >= 0.45 and "Front telephoto camera" in target_text(tele)
+    _, both = apply_degradation(f, DegradationSpec("blackout", 0.15, [1, 5], seed=0),
+                                camera_indices=LOADER_6CAM)
+    assert target_severity(both) >= 0.70, target_text(both)
+    _, total = apply_degradation(f, DegradationSpec("blackout", 0.15, list(range(6)), seed=0),
+                                 camera_indices=LOADER_6CAM)
+    text = target_text(total)
+    assert target_severity(total) >= STOP_SEVERITY and "All cameras" in text
+    assert "no usable visual input" in text and "controlled stop" in text
+    # 5 of 6 black is NOT "all cameras" once the loader order is known
+    _, five = apply_degradation(f, DegradationSpec("blackout", 0.15, [0, 1, 2, 3, 5], seed=0),
+                                camera_indices=LOADER_6CAM)
+    assert "All cameras" not in target_text(five) and target_severity(five) < STOP_SEVERITY
+    # composites carry the mapping to their components
+    _, comp = apply_degradation(f, compose(("blackout", 0.15, [5]), ("blur", 0.2, [0]), seed=0),
+                                camera_indices=LOADER_6CAM)
+    assert target_severity(comp) >= 0.45 and "clearly visible" not in target_text(comp)
+
+
+def test_camera_indices_flow_through_sample_spec_manifest_and_dataset():
+    from afh.degradation import sample_spec
+    spec = sample_spec(3, families=("blackout",), clean_fraction=0.0, camera_indices=LOADER_4CAM)
+    _, spec = apply_degradation(_frames(n_cam=4), spec)        # mapping taken from the spec
+    assert spec.params["camera_indices"] == LOADER_4CAM
+    # automatic camera choice weights forward cameras by id: position 3 (front_tele) is
+    # picked ~3x as often as position 0 (cross_left) at one camera per spec
+    picks = [apply_degradation(_frames(n_cam=4, h=2, w=2),
+                               DegradationSpec("glare", 0.1, seed=k),
+                               camera_indices=LOADER_4CAM)[1].cameras[0] for k in range(1200)]
+    assert picks.count(3) > 2 * picks.count(0), (picks.count(3), picks.count(0))
+    # manifest: a front_tele blackout at position 3 is damped like 0.45 and re-applies
+    # identically in the training Dataset on real 4-camera frames
+    xy = _realistic_future(0).tolist()
+    cache = {"c": {"t0_us": 0, "clean_reasoning": "ok", "future_xy": xy,
+                   "camera_indices": LOADER_4CAM}}
+    m = build_manifest(cache, n_per_clip=6, seed=0,
+                       extra_specs=[DegradationSpec("blackout", 0.15, [3])])
+    tele = m[-1]
+    assert tele["target_severity"] >= 0.45 and "Front telephoto" in tele["target_text"]
+    np.testing.assert_allclose(tele["target_xy"],
+                               target_trajectory(np.asarray(xy), 0.45).round(3), atol=1e-9)
+    ds = UncertaintyDataset(m, frame_loader=lambda cid, t0: (_frames(n_cam=4), {}))
+    assert all(ds[i]["frames"].shape[0] == 4 for i in range(len(m)))
+    assert (ds[len(m) - 1]["frames"][3] == 0).all() and (ds[len(m) - 1]["frames"][1] != 0).any()
+
+
+def test_camera_indices_validation_and_fallback():
+    f = _frames()
+    for bad in ([0, 1, 2], [0, 1, 2, 3, 4, 5, 9], [0, 1, 1, 3, 4, 5, 6]):
+        try:
+            apply_degradation(f, DegradationSpec("blur", 0.5, seed=0), camera_indices=bad)
+            raise AssertionError(f"accepted invalid camera_indices {bad}")
+        except ValueError:
+            pass
+    _, spec = apply_degradation(_frames(n_cam=4), DegradationSpec("blur", 0.5, seed=0),
+                                camera_indices=LOADER_4CAM)
+    try:        # a stored mapping cannot be silently replaced by another one
+        apply_degradation(_frames(n_cam=4), spec, camera_indices=[0, 1, 2, 3])
+        raise AssertionError("conflicting camera_indices accepted")
+    except ValueError:
+        pass
+    # the identity 7-camera order gives exactly the fallback result (pixels and targets)
+    for fam in FAMILIES:
+        a, sa = apply_degradation(f, DegradationSpec(fam, 0.4, seed=5))
+        b, sb = apply_degradation(f, DegradationSpec(fam, 0.4, seed=5),
+                                  camera_indices=list(range(7)))
+        assert (a == b).all() and sa.cameras == sb.cameras
+        assert target_text(sa) == target_text(sb) and target_severity(sa) == target_severity(sb)
+
+
+def test_cam_index_map_matches_occlude_frames_runner():
+    """afh.cameras.CAM_INDEX_TO_ID must be the table occlude_frames uses. The runner imports
+    torch, so read its source instead of importing it."""
+    import ast
+    from afh.cameras import CAM_INDEX_TO_ID
+    path = os.path.join(os.path.dirname(__file__), "..", "runners", "run_counterfactual_a2.py")
+    tree = ast.parse(open(path).read())
+    found = [ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+             and any(getattr(t, "id", None) == "CAM_INDEX_TO_ID" for t in n.targets)]
+    assert found == [CAM_INDEX_TO_ID], found
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = 0

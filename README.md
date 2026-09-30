@@ -291,7 +291,13 @@ complete and runs cold; training is the next step.
   least « visibility ahead is reduced », losing both forward cameras raises it to at least
   « I cannot confirm the road ahead is clear », and losing every camera means « no usable
   visual input » and a controlled stop. So no target ever teaches the [NVlabs/alpamayo2#9](https://github.com/NVlabs/alpamayo2/issues/9) failure
-  (a blind front camera narrated as « the road ahead is clearly visible »). Cold tests
+  (a blind front camera narrated as « the road ahead is clearly visible »). Cameras are
+  identified by camera ID, not tensor position: pass the loader's `camera_indices` to
+  `apply_degradation` / `sample_spec` / `target_severity` (or `--camera-indices` to the
+  CLI), so that front_tele is recognised at position 3 of the 4-camera loader
+  `[0, 1, 2, 6]` and at position 5 of the Alpamayo 2 Super profile `[0, 1, 2, 3, 5, 6]`
+  (`afh/cameras.py`, the same `CAM_INDEX_TO_ID` as `occlude_frames`). Without it, the
+  tensor position is read as the 7-camera loader index (documented fallback). Cold tests
   enforce all of these properties.
 - **`afh/uncertainty_dataset.py`** — the "dataset" is a JSONL manifest of a few hundred
   bytes per example (clip, spec, targets); frames are re-loaded and re-degraded at

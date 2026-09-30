@@ -96,7 +96,8 @@ def build_manifest(clean_cache: dict, n_per_clip: int = 16, seed: int = 0,
                    composite_fraction: float = 0.0,
                    n_components: int = 2,
                    exclude_combos: Iterable = (),
-                   extra_specs: Iterable[DegradationSpec] | None = None) -> list[dict]:
+                   extra_specs: Iterable[DegradationSpec] | None = None,
+                   camera_indices: Iterable[int] | None = None) -> list[dict]:
     """
     For each clip, sample n_per_clip specs and derive targets. Returns a list of dicts
     (one per example). Camera choice inside a spec is resolved at load time by
@@ -108,18 +109,25 @@ def build_manifest(clean_cache: dict, n_per_clip: int = 16, seed: int = 0,
     single-family manifests of earlier versions exactly (same seed -> same lines).
     extra_specs: templates appended for EVERY clip (used to guarantee held-out coverage in
     a test manifest); each gets a clip-specific seed so clips differ.
+    camera_indices: the loader's camera order (afh.cameras), for every clip; a clip's own
+    clean-cache entry "camera_indices" overrides it. Cameras are then named and weighted
+    by camera ID and the tensor size is len(camera_indices). Without either: fallback
+    to tensor position == loader index with n_cam cameras (earlier manifests unchanged).
     """
     rng = random.Random(seed)
-    dummy = np.zeros((n_cam, 4, 3, 8, 8), dtype=np.uint8)
+    default_ci = list(camera_indices) if camera_indices is not None else None
     families = tuple(families)
     exclude_combos = tuple(exclude_combos)
     out = []
     for cid, info in clean_cache.items():
         xy_true = np.asarray(info.get("future_xy") or [], dtype=float)
+        ci = info.get("camera_indices", default_ci)
+        dummy = np.zeros((len(ci) if ci is not None else n_cam, 4, 3, 8, 8), dtype=np.uint8)
         specs = []
         for k in range(n_per_clip):
             spec_seed = rng.randrange(1 << 30)
-            spec = sample_spec(spec_seed, families=families, clean_fraction=clean_fraction)
+            spec = sample_spec(spec_seed, families=families, clean_fraction=clean_fraction,
+                               camera_indices=ci)
             # separate stream so composite_fraction=0 leaves the legacy sequence untouched
             if (composite_fraction > 0 and spec.family != "clean"
                     and random.Random(spec_seed ^ 0x5EED).random() < composite_fraction):
@@ -137,7 +145,7 @@ def build_manifest(clean_cache: dict, n_per_clip: int = 16, seed: int = 0,
                 specs.append(DegradationSpec(**d))
         for spec in specs:
             # resolve cameras/params deterministically (same seed => same choice on real frames)
-            _, spec = apply_degradation(dummy, spec)
+            _, spec = apply_degradation(dummy, spec, camera_indices=ci)
             text = target_text(spec, clean_reasoning=info.get("clean_reasoning"))
             ts = target_severity(spec)   # camera-aware: a lost front camera weighs more
             traj = (target_trajectory(xy_true, ts).round(3).tolist()
@@ -190,7 +198,8 @@ def build_split(clean_cache: dict, test_fraction: float = 0.2, seed: int = 0,
                 n_holdout_per_clip: int = 2,
                 composite_fraction: float = 0.0, n_components: int = 2,
                 clean_fraction: float = CLEAN_FRACTION, n_cam: int = 7,
-                families: Iterable[str] = FAMILIES) -> dict:
+                families: Iterable[str] = FAMILIES,
+                camera_indices: Iterable[int] | None = None) -> dict:
     """
     Held-out train/test manifests.
 
@@ -226,6 +235,7 @@ def build_split(clean_cache: dict, test_fraction: float = 0.2, seed: int = 0,
 
     train = build_manifest(train_cache, n_per_clip=n_per_clip, seed=seed,
                            families=train_fams, clean_fraction=clean_fraction, n_cam=n_cam,
+                           camera_indices=camera_indices,
                            composite_fraction=train_comp, n_components=n_components,
                            exclude_combos=h_combo)
     extra = []
@@ -239,6 +249,7 @@ def build_split(clean_cache: dict, test_fraction: float = 0.2, seed: int = 0,
                                                    is not None else n_per_clip),
                           seed=seed + 1, families=families, clean_fraction=clean_fraction,
                           n_cam=n_cam, composite_fraction=composite_fraction,
+                          camera_indices=camera_indices,
                           n_components=n_components, extra_specs=extra)
     for name, entries in (("train", train), ("test", test)):
         for e in entries:
@@ -366,6 +377,10 @@ class UncertaintyDataset:
 
 # --------------------------------------------------------------------------- CLI
 
+def _parse_ci(text):
+    return [int(x) for x in text.split(",")] if text else None
+
+
 def _main():
     import argparse
     ap = argparse.ArgumentParser(description="Build the uncertainty fine-tuning manifest (cold)")
@@ -379,6 +394,7 @@ def _main():
     b.add_argument("--n-cam", type=int, default=7)
     b.add_argument("--out", default="outputs/uncertainty_manifest.jsonl")
     b.add_argument("--composite-fraction", type=float, default=0.0)
+    b.add_argument("--camera-indices", help='loader camera order, e.g. "0,1,2,6" (afh.cameras)')
     sp = sub.add_parser("split", help="held-out train/test manifests (by clip, family, combo)")
     sp.add_argument("--clean-cache")
     sp.add_argument("--records")
@@ -392,6 +408,7 @@ def _main():
     sp.add_argument("--seed", type=int, default=0)
     sp.add_argument("--n-cam", type=int, default=7)
     sp.add_argument("--out-dir", default="outputs/uncertainty_split")
+    sp.add_argument("--camera-indices", help='loader camera order, e.g. "0,1,2,3,5,6"')
     s = sub.add_parser("summary")
     s.add_argument("manifest")
     a = ap.parse_args()
@@ -405,7 +422,8 @@ def _main():
 
     if a.cmd == "build":
         entries = build_manifest(load_cache(), n_per_clip=a.n_per_clip, seed=a.seed,
-                                 n_cam=a.n_cam, composite_fraction=a.composite_fraction)
+                                 n_cam=a.n_cam, composite_fraction=a.composite_fraction,
+                                 camera_indices=_parse_ci(a.camera_indices))
         write_manifest(entries, a.out)
         print(manifest_summary(entries))
         print(f"-> {a.out}")
@@ -414,7 +432,7 @@ def _main():
         sp = build_split(load_cache(), test_fraction=a.test_fraction, seed=a.seed,
                          holdout_families=a.holdout_family, holdout_combos=a.holdout_combo,
                          n_per_clip=a.n_per_clip, composite_fraction=a.composite_fraction,
-                         n_cam=a.n_cam)
+                         n_cam=a.n_cam, camera_indices=_parse_ci(a.camera_indices))
         for name in ("train", "test"):
             path = os.path.join(a.out_dir, f"{name}.jsonl")
             write_manifest(sp[name], path)
