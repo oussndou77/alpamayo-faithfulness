@@ -32,12 +32,12 @@ this and is run by build_split() itself.
 
 CLI (Stage B):
     python -m afh.uncertainty_dataset build \
-        --clean-cache fixtures/clean_cache_a2.json \
+        --clean-cache fixtures/clean_cache_a2.json --camera-indices 0,1,2,3,4,5,6 \
         --n-per-clip 16 --out outputs/uncertainty_manifest.jsonl
 
     python -m afh.uncertainty_dataset split \
         --records fixtures/records_a2.json --diag fixtures/raw_diag_a2.json \
-        --test-fraction 0.3 --holdout-family desync --holdout-combo glare+blur \
+        --camera-indices 0,1,2,3,4,5,6 --test-fraction 0.3 --holdout-family desync --holdout-combo glare+blur \
         --composite-fraction 0.3 --out-dir outputs/uncertainty_split
 """
 
@@ -92,7 +92,6 @@ def clean_cache_from_records(records_path: str, diag_path: str | None = None,
 def build_manifest(clean_cache: dict, n_per_clip: int = 16, seed: int = 0,
                    families: Iterable[str] = FAMILIES,
                    clean_fraction: float = CLEAN_FRACTION,
-                   n_cam: int = 7,
                    composite_fraction: float = 0.0,
                    n_components: int = 2,
                    exclude_combos: Iterable = (),
@@ -101,28 +100,40 @@ def build_manifest(clean_cache: dict, n_per_clip: int = 16, seed: int = 0,
     """
     For each clip, sample n_per_clip specs and derive targets. Returns a list of dicts
     (one per example). Camera choice inside a spec is resolved at load time by
-    apply_degradation (needs n_cam); we pre-resolve it here with a lightweight dry run on
-    a tiny dummy tensor so the target TEXT (which names cameras) is fixed in the manifest.
+    apply_degradation; we pre-resolve it here with a lightweight dry run on a tiny dummy
+    tensor so the target TEXT (which names cameras) is fixed in the manifest.
 
     composite_fraction: share of DEGRADED examples that are composites of `n_components`
     distinct families (never a combo in `exclude_combos`). Default 0 reproduces the
     single-family manifests of earlier versions exactly (same seed -> same lines).
     extra_specs: templates appended for EVERY clip (used to guarantee held-out coverage in
     a test manifest); each gets a clip-specific seed so clips differ.
-    camera_indices: the loader's camera order (afh.cameras), for every clip; a clip's own
-    clean-cache entry "camera_indices" overrides it. Cameras are then named and weighted
-    by camera ID and the tensor size is len(camera_indices). Without either: fallback
-    to tensor position == loader index with n_cam cameras (earlier manifests unchanged).
+    camera_indices: REQUIRED. The loader's camera order (data["camera_indices"], see
+    afh.cameras) for every clip; a clip's own clean-cache entry "camera_indices"
+    overrides it. Cameras are named and weighted by camera ID and the tensor size is
+    len(camera_indices). There is no silent default: a manifest built with the wrong
+    camera order teaches wrong targets (a black front_tele read as "rear-left ... clearly
+    visible"), so a clip without a mapping is an error. The A2 fixtures come from the
+    7-camera loader: camera_indices=[0, 1, 2, 3, 4, 5, 6].
     """
     rng = random.Random(seed)
     default_ci = list(camera_indices) if camera_indices is not None else None
+    missing = [cid for cid, info in clean_cache.items()
+               if info.get("camera_indices", default_ci) is None]
+    if missing:
+        raise ValueError(
+            f"camera_indices is required: no loader camera order for {len(missing)} clip(s) "
+            f"{missing[:3]}{' ...' if len(missing) > 3 else ''}. Pass camera_indices=... "
+            f"(CLI: --camera-indices) with the loader's data['camera_indices'], or put a "
+            f"'camera_indices' entry per clip in the clean cache. The A2 fixtures use the "
+            f"7-camera loader: 0,1,2,3,4,5,6.")
     families = tuple(families)
     exclude_combos = tuple(exclude_combos)
     out = []
     for cid, info in clean_cache.items():
         xy_true = np.asarray(info.get("future_xy") or [], dtype=float)
         ci = info.get("camera_indices", default_ci)
-        dummy = np.zeros((len(ci) if ci is not None else n_cam, 4, 3, 8, 8), dtype=np.uint8)
+        dummy = np.zeros((len(ci), 4, 3, 8, 8), dtype=np.uint8)
         specs = []
         for k in range(n_per_clip):
             spec_seed = rng.randrange(1 << 30)
@@ -197,7 +208,7 @@ def build_split(clean_cache: dict, test_fraction: float = 0.2, seed: int = 0,
                 n_per_clip: int = 16, n_test_per_clip: int | None = None,
                 n_holdout_per_clip: int = 2,
                 composite_fraction: float = 0.0, n_components: int = 2,
-                clean_fraction: float = CLEAN_FRACTION, n_cam: int = 7,
+                clean_fraction: float = CLEAN_FRACTION,
                 families: Iterable[str] = FAMILIES,
                 camera_indices: Iterable[int] | None = None) -> dict:
     """
@@ -234,7 +245,7 @@ def build_split(clean_cache: dict, test_fraction: float = 0.2, seed: int = 0,
     test_cache = {c: clean_cache[c] for c in test_ids}
 
     train = build_manifest(train_cache, n_per_clip=n_per_clip, seed=seed,
-                           families=train_fams, clean_fraction=clean_fraction, n_cam=n_cam,
+                           families=train_fams, clean_fraction=clean_fraction,
                            camera_indices=camera_indices,
                            composite_fraction=train_comp, n_components=n_components,
                            exclude_combos=h_combo)
@@ -248,7 +259,7 @@ def build_split(clean_cache: dict, test_fraction: float = 0.2, seed: int = 0,
     test = build_manifest(test_cache, n_per_clip=(n_test_per_clip if n_test_per_clip
                                                    is not None else n_per_clip),
                           seed=seed + 1, families=families, clean_fraction=clean_fraction,
-                          n_cam=n_cam, composite_fraction=composite_fraction,
+                          composite_fraction=composite_fraction,
                           camera_indices=camera_indices,
                           n_components=n_components, extra_specs=extra)
     for name, entries in (("train", train), ("test", test)):
@@ -377,6 +388,11 @@ class UncertaintyDataset:
 
 # --------------------------------------------------------------------------- CLI
 
+CI_HELP = ('REQUIRED unless every clip of the clean cache has "camera_indices": the loader '
+           'camera order (data["camera_indices"]), e.g. "0,1,2,6"; A2 fixtures (7-camera '
+           'loader): "0,1,2,3,4,5,6"')
+
+
 def _parse_ci(text):
     return [int(x) for x in text.split(",")] if text else None
 
@@ -391,10 +407,9 @@ def _main():
     b.add_argument("--diag", help="raw_diag.json (waypoints) matching --records")
     b.add_argument("--n-per-clip", type=int, default=16)
     b.add_argument("--seed", type=int, default=0)
-    b.add_argument("--n-cam", type=int, default=7)
     b.add_argument("--out", default="outputs/uncertainty_manifest.jsonl")
     b.add_argument("--composite-fraction", type=float, default=0.0)
-    b.add_argument("--camera-indices", help='loader camera order, e.g. "0,1,2,6" (afh.cameras)')
+    b.add_argument("--camera-indices", help=CI_HELP)
     sp = sub.add_parser("split", help="held-out train/test manifests (by clip, family, combo)")
     sp.add_argument("--clean-cache")
     sp.add_argument("--records")
@@ -406,9 +421,8 @@ def _main():
     sp.add_argument("--composite-fraction", type=float, default=0.3)
     sp.add_argument("--n-per-clip", type=int, default=16)
     sp.add_argument("--seed", type=int, default=0)
-    sp.add_argument("--n-cam", type=int, default=7)
     sp.add_argument("--out-dir", default="outputs/uncertainty_split")
-    sp.add_argument("--camera-indices", help='loader camera order, e.g. "0,1,2,3,5,6"')
+    sp.add_argument("--camera-indices", help=CI_HELP)
     s = sub.add_parser("summary")
     s.add_argument("manifest")
     a = ap.parse_args()
@@ -420,19 +434,26 @@ def _main():
             return clean_cache_from_records(a.records, a.diag)
         ap.error("provide --clean-cache or --records")
 
+    def run(fn, *args, **kw):
+        try:
+            return fn(*args, **kw)
+        except ValueError as e:          # missing / invalid camera order: explicit CLI error
+            ap.error(str(e).replace("camera_indices=... (CLI: --camera-indices)",
+                                    "--camera-indices"))
+
     if a.cmd == "build":
-        entries = build_manifest(load_cache(), n_per_clip=a.n_per_clip, seed=a.seed,
-                                 n_cam=a.n_cam, composite_fraction=a.composite_fraction,
-                                 camera_indices=_parse_ci(a.camera_indices))
+        entries = run(build_manifest, load_cache(), n_per_clip=a.n_per_clip, seed=a.seed,
+                      composite_fraction=a.composite_fraction,
+                      camera_indices=_parse_ci(a.camera_indices))
         write_manifest(entries, a.out)
         print(manifest_summary(entries))
         print(f"-> {a.out}")
     elif a.cmd == "split":
         import os
-        sp = build_split(load_cache(), test_fraction=a.test_fraction, seed=a.seed,
-                         holdout_families=a.holdout_family, holdout_combos=a.holdout_combo,
-                         n_per_clip=a.n_per_clip, composite_fraction=a.composite_fraction,
-                         n_cam=a.n_cam, camera_indices=_parse_ci(a.camera_indices))
+        sp = run(build_split, load_cache(), test_fraction=a.test_fraction, seed=a.seed,
+                 holdout_families=a.holdout_family, holdout_combos=a.holdout_combo,
+                 n_per_clip=a.n_per_clip, composite_fraction=a.composite_fraction,
+                 camera_indices=_parse_ci(a.camera_indices))
         for name in ("train", "test"):
             path = os.path.join(a.out_dir, f"{name}.jsonl")
             write_manifest(sp[name], path)

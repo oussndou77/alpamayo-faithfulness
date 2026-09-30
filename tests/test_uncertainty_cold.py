@@ -32,6 +32,7 @@ from afh.eval_uncertainty import (
 )
 
 FIX = os.path.join(os.path.dirname(__file__), "..", "fixtures")
+LOADER_7CAM = [0, 1, 2, 3, 4, 5, 6]    # A2 fixtures come from the 7-camera loader
 
 
 def _frames(seed=0, n_cam=7, n_t=4, h=16, w=16):
@@ -382,7 +383,7 @@ def test_manifest_targets_use_camera_aware_severity():
     xy = _realistic_future(0).tolist()
     cache = {"c": {"t0_us": 0, "clean_reasoning": "ok", "future_xy": xy}}
     m = build_manifest(cache, n_per_clip=0, seed=0, extra_specs=[
-        DegradationSpec("blackout", 0.15, [1]), DegradationSpec("blackout", 0.15, [4])])
+        DegradationSpec("blackout", 0.15, [1]), DegradationSpec("blackout", 0.15, [4])], camera_indices=LOADER_7CAM)
     front, rear = m
     np.testing.assert_allclose(front["target_xy"],
                                target_trajectory(np.asarray(xy), 0.45).round(3), atol=1e-9)
@@ -406,7 +407,7 @@ def test_build_split_holds_out_clips_families_combos():
     cache = _synthetic_cache(10)
     sp = build_split(cache, test_fraction=0.3, seed=0, holdout_families=["desync"],
                      holdout_combos=["glare+blur"], n_per_clip=24, composite_fraction=0.5,
-                     n_holdout_per_clip=2)
+                     n_holdout_per_clip=2, camera_indices=LOADER_7CAM)
     train, test = sp["train"], sp["test"]
     assert not {e["clip_id"] for e in train} & {e["clip_id"] for e in test}
     assert all("desync" not in combo_key(e["spec"]).split("+") for e in train)
@@ -424,13 +425,13 @@ def test_build_split_holds_out_clips_families_combos():
     assert all(e["split"] == "test" for e in test)
     # deterministic
     sp2 = build_split(cache, test_fraction=0.3, seed=0, holdout_families=["desync"],
-                      holdout_combos=["glare+blur"], n_per_clip=24, composite_fraction=0.5)
+                      holdout_combos=["glare+blur"], n_per_clip=24, composite_fraction=0.5, camera_indices=LOADER_7CAM)
     assert json.dumps(sp2["train"]) == json.dumps(train)
 
 
 def test_check_split_detects_leakage():
     cache = _synthetic_cache(4)
-    sp = build_split(cache, test_fraction=0.5, seed=0, n_per_clip=4)
+    sp = build_split(cache, test_fraction=0.5, seed=0, n_per_clip=4, camera_indices=LOADER_7CAM)
     try:
         check_split(sp["train"], sp["train"][:1] + sp["test"])
         raise AssertionError("clip leakage not detected")
@@ -447,9 +448,9 @@ def test_check_split_detects_leakage():
 def test_legacy_manifest_unchanged_and_dataset_loads_composites():
     cache = clean_cache_from_records(os.path.join(FIX, "records_a2.json"),
                                      os.path.join(FIX, "raw_diag_a2.json"))
-    a = build_manifest(cache, n_per_clip=6, seed=0)
+    a = build_manifest(cache, n_per_clip=6, seed=0, camera_indices=LOADER_7CAM)
     assert all(e["family"] != "composite" for e in a)
-    m = build_manifest(cache, n_per_clip=12, seed=0, composite_fraction=1.0)
+    m = build_manifest(cache, n_per_clip=12, seed=0, composite_fraction=1.0, camera_indices=LOADER_7CAM)
     comps = [e for e in m if e["family"] == "composite"]
     assert comps, "composite_fraction=1 should produce composites"
     ds = UncertaintyDataset(comps, frame_loader=lambda cid, t0: (_frames(), {"clip": cid}))
@@ -565,7 +566,7 @@ def test_end_to_end_split_to_eval_on_fixtures():
     cache = clean_cache_from_records(os.path.join(FIX, "records_a2.json"),
                                      os.path.join(FIX, "raw_diag_a2.json"))
     sp = build_split(cache, test_fraction=0.34, seed=0, holdout_families=["desync"],
-                     holdout_combos=["glare+blur"], n_per_clip=8, composite_fraction=0.3)
+                     holdout_combos=["glare+blur"], n_per_clip=8, composite_fraction=0.3, camera_indices=LOADER_7CAM)
     recs = []
     for e in sp["test"]:
         gt = cache[e["clip_id"]]["future_xy"]
@@ -679,7 +680,7 @@ def test_camera_indices_flow_through_sample_spec_manifest_and_dataset():
     cache = {"c": {"t0_us": 0, "clean_reasoning": "ok", "future_xy": xy,
                    "camera_indices": LOADER_4CAM}}
     m = build_manifest(cache, n_per_clip=6, seed=0,
-                       extra_specs=[DegradationSpec("blackout", 0.15, [3])])
+                       extra_specs=[DegradationSpec("blackout", 0.15, [3])])   # per-clip 4-cam
     tele = m[-1]
     assert tele["target_severity"] >= 0.45 and "Front telephoto" in tele["target_text"]
     np.testing.assert_allclose(tele["target_xy"],
@@ -723,6 +724,64 @@ def test_cam_index_map_matches_occlude_frames_runner():
     found = [ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
              and any(getattr(t, "id", None) == "CAM_INDEX_TO_ID" for t in n.targets)]
     assert found == [CAM_INDEX_TO_ID], found
+
+
+def test_all_cameras_means_every_camera():
+    """ "All cameras" only when every camera of the tensor is hit, with or without
+    camera_indices: 5 or 6 black cameras out of 7 are listed, never called "all"."""
+    f = _frames()
+    for ci in (None, LOADER_7CAM):
+        for fam in ("blackout", "glare"):
+            for cams in ([0, 1, 2, 3, 4], [0, 1, 2, 3, 4, 5]):
+                _, spec = apply_degradation(f, DegradationSpec(fam, 0.8, cams, seed=0),
+                                            camera_indices=ci)
+                text = target_text(spec)
+                assert "All cameras" not in text and "all cameras" not in text, (ci, cams, text)
+            _, full = apply_degradation(f, DegradationSpec(fam, 0.8, list(range(7)), seed=0),
+                                        camera_indices=ci)
+            assert target_text(full).lower().startswith(("all cameras", "strong glare is "
+                                                         "saturating all cameras")), \
+                target_text(full)
+    # composites: each component is "all" only for the whole tensor
+    _, comp = apply_degradation(f, compose(("blackout", 0.9, [0, 1, 2, 3, 4, 5]),
+                                           ("blur", 0.3, list(range(7))), seed=0))
+    text = target_text(comp)
+    assert text.startswith("Front-left, front, front-right") and "all cameras are" in text, text
+
+
+def test_manifest_requires_camera_indices():
+    """build_manifest / build_split / the CLI refuse to build without a camera order."""
+    import subprocess, tempfile
+    cache = clean_cache_from_records(os.path.join(FIX, "records_a2.json"),
+                                     os.path.join(FIX, "raw_diag_a2.json"))
+    for fn in (lambda: build_manifest(cache, n_per_clip=2, seed=0),
+               lambda: build_split(cache, test_fraction=0.34, seed=0, n_per_clip=2)):
+        try:
+            fn()
+            raise AssertionError("built a manifest without camera_indices")
+        except ValueError as e:
+            assert "camera_indices is required" in str(e) and "0,1,2,3,4,5,6" in str(e), e
+    # per-clip mappings are enough, and a partial one names the missing clips
+    per_clip = {c: dict(v, camera_indices=LOADER_7CAM) for c, v in cache.items()}
+    assert len(build_manifest(per_clip, n_per_clip=2, seed=0)) == 6
+    partial = dict(per_clip)
+    first = next(iter(partial))
+    partial[first] = {k: v for k, v in partial[first].items() if k != "camera_indices"}
+    try:
+        build_manifest(partial, n_per_clip=2, seed=0)
+        raise AssertionError("clip without camera order accepted")
+    except ValueError as e:
+        assert first in str(e) and "1 clip(s)" in str(e), e
+    root = os.path.join(os.path.dirname(__file__), "..")
+    base = [sys.executable, "-m", "afh.uncertainty_dataset", "build",
+            "--records", os.path.join(FIX, "records_a2.json"),
+            "--diag", os.path.join(FIX, "raw_diag_a2.json"), "--n-per-clip", "2",
+            "--out", os.path.join(tempfile.mkdtemp(), "manifest.jsonl")]
+    bad = subprocess.run(base, cwd=root, capture_output=True, text=True)
+    assert bad.returncode != 0 and "--camera-indices" in bad.stderr, (bad.returncode, bad.stderr)
+    ok = subprocess.run(base + ["--camera-indices", "0,1,2,3,4,5,6"], cwd=root,
+                        capture_output=True, text=True)
+    assert ok.returncode == 0, ok.stderr
 
 
 def _run_all():

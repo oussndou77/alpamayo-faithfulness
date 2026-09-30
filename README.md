@@ -296,14 +296,18 @@ complete and runs cold; training is the next step.
   `apply_degradation` / `sample_spec` / `target_severity` (or `--camera-indices` to the
   CLI), so that front_tele is recognised at position 3 of the 4-camera loader
   `[0, 1, 2, 6]` and at position 5 of the Alpamayo 2 Super profile `[0, 1, 2, 3, 5, 6]`
-  (`afh/cameras.py`, the same `CAM_INDEX_TO_ID` as `occlude_frames`). Without it, the
-  tensor position is read as the 7-camera loader index (documented fallback). Cold tests
+  (`afh/cameras.py`, the same `CAM_INDEX_TO_ID` as `occlude_frames`). Manifests cannot be
+  built without it (`build_manifest` and the CLI fail with an explicit error); the
+  low-level functions still read a tensor position as the 7-camera loader index when it
+  is absent. « All cameras » always means every camera of the tensor. Cold tests
   enforce all of these properties.
 - **`afh/uncertainty_dataset.py`** — the "dataset" is a JSONL manifest of a few hundred
   bytes per example (clip, spec, targets); frames are re-loaded and re-degraded at
   training time, so nothing heavy is stored and every example is reproducible. ~40% clean
   examples keep the model calibrated rather than permanently anxious.
-  `python -m afh.uncertainty_dataset build --records fixtures/records_a2.json --diag fixtures/raw_diag_a2.json`
+  `python -m afh.uncertainty_dataset build --records fixtures/records_a2.json --diag fixtures/raw_diag_a2.json --camera-indices 0,1,2,3,4,5,6`
+  (`--camera-indices` is required: the loader's camera order for these clips, here the
+  7-camera loader)
 - **Composite degradations** — a spec can chain several families, each optionally
   pinned to its own camera (`compose(("glare", .8, [1]), ("blur", .5, [0]))`: glare on the
   front camera, blur on the front-left one). Composite severity is the noisy-OR
@@ -326,7 +330,7 @@ uncertainty reporting separately from trajectory changes.
    clip, and `check_split` fails on any leak.
    ```
    python -m afh.uncertainty_dataset split --records fixtures/records_a2.json \
-       --diag fixtures/raw_diag_a2.json --test-fraction 0.3 \
+       --diag fixtures/raw_diag_a2.json --camera-indices 0,1,2,3,4,5,6 --test-fraction 0.3 \
        --holdout-family desync --holdout-combo glare+blur --composite-fraction 0.3
    ```
 2. **Run the baseline and the fine-tuned model on the same test manifest** (GPU, pod).
