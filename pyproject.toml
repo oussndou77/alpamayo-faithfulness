@@ -1,10 +1,15 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "alpamayo-faithfulness"
 version = "0.1.0"
 description = "Faithfulness evaluation harness for NVIDIA Alpamayo Chain-of-Causation reasoning traces"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Ousseynou Ndour" }]
 
 # Core harness (parser + axes + scorecard) — pure-Python, runs on a laptop, no GPU.
@@ -25,6 +30,12 @@ gpu = [
 dev = [
     "pytest>=7.0",
 ]
+
+# Only the harness package ships. runners/ (GPU scripts, need torch), tests/, fixtures/
+# and docs/ stay in the repo: without this, setuptools' flat-layout auto-discovery finds
+# several top-level packages and refuses to build.
+[tool.setuptools.packages.find]
+include = ["afh*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
